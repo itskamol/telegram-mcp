@@ -91,3 +91,49 @@ func TestAddRefusesBrokenJSON(t *testing.T) {
 		t.Fatal("file changed")
 	}
 }
+
+func TestStablePathKeepsPackageManagerSymlink(t *testing.T) {
+	root := t.TempDir()
+	versioned := filepath.Join(root, "Caskroom", "telegram-mcp", "0.2.2", "telegram-mcp")
+	bin := filepath.Join(root, "bin")
+	for _, d := range []string{filepath.Dir(versioned), bin} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(versioned, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(bin, "telegram-mcp")
+	if err := os.Symlink(versioned, link); err != nil {
+		t.Fatal(err)
+	}
+	real, err := filepath.EvalSymlinks(versioned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable, _ := filepath.EvalSymlinks(bin)
+	stable = filepath.Join(stable, "telegram-mcp")
+
+	// Invoked by name through PATH, as `telegram-mcp install ...` is.
+	t.Setenv("PATH", filepath.Dir(stable))
+	if got := stablePath("telegram-mcp", real); got != stable {
+		t.Errorf("by name: got %s, want %s", got, stable)
+	}
+	// Invoked by full path.
+	if got := stablePath(stable, real); got != stable {
+		t.Errorf("by path: got %s, want %s", got, stable)
+	}
+	// arg0 leads to some other binary: fall back to the resolved path.
+	other := filepath.Join(bin, "other")
+	if err := os.WriteFile(other, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := stablePath(other, real); got != real {
+		t.Errorf("other binary: got %s, want %s", got, real)
+	}
+	// Not found on PATH at all.
+	if got := stablePath("nope-not-here", real); got != real {
+		t.Errorf("missing: got %s, want %s", got, real)
+	}
+}

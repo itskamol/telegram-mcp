@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 )
 
 // Server is one mcpServers entry.
@@ -129,21 +131,46 @@ func toAny(ss []string) []any {
 	return out
 }
 
-// Executable is the absolute, symlink-free path of the running binary.
-// It refuses paths that will not survive, like `go run` build caches.
+// Executable is the absolute path to write into client configs. It refuses
+// paths that will not survive, like `go run` build caches.
 func Executable() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	if exe, err = filepath.EvalSymlinks(exe); err != nil {
+	real, err := filepath.EvalSymlinks(exe)
+	if err != nil {
 		return "", err
 	}
 	tmp, _ := filepath.EvalSymlinks(os.TempDir())
 	if tmp != "" {
-		if rel, err := filepath.Rel(tmp, exe); err == nil && filepath.IsLocal(rel) {
-			return "", fmt.Errorf("%s is in a temporary directory; install the binary first (e.g. into /usr/local/bin)", exe)
+		if rel, err := filepath.Rel(tmp, real); err == nil && filepath.IsLocal(rel) {
+			return "", fmt.Errorf("%s is in a temporary directory; install the binary first (e.g. into /usr/local/bin)", real)
 		}
 	}
-	return exe, nil
+	return stablePath(os.Args[0], real), nil
+}
+
+// stablePath prefers the command as it was invoked, such as Homebrew's
+// /opt/homebrew/bin/telegram-mcp, over the resolved file: package managers
+// keep that symlink pointing at the current version, while the versioned
+// directory it resolves to (Caskroom/telegram-mcp/0.2.2) is deleted on
+// upgrade. The invoked path is used only if it leads to this very binary.
+func stablePath(arg0, real string) string {
+	p := arg0
+	if !strings.ContainsRune(arg0, filepath.Separator) {
+		found, err := exec.LookPath(arg0)
+		if err != nil {
+			return real
+		}
+		p = found
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return real
+	}
+	if r, err := filepath.EvalSymlinks(abs); err != nil || r != real {
+		return real
+	}
+	return abs
 }
