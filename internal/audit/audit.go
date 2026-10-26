@@ -20,6 +20,7 @@ type Entry struct {
 	ChatID   int64  `json:"chat_id,omitempty"`
 	ToChatID int64  `json:"to_chat_id,omitempty"`
 	IDs      []int  `json:"message_ids,omitempty"`
+	Path     string `json:"path,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
 

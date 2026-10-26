@@ -5,8 +5,8 @@ binary: no Python, no `uv`, no Docker. It is a focused Go rewrite inspired by
 [chigwell/telegram-mcp](https://github.com/chigwell/telegram-mcp), built on
 [gotd/td](https://github.com/gotd/td).
 
-> **Status: early.** Login, secure session storage and 12 core tools work.
-> Media tools are next (see [Roadmap](#roadmap)).
+> **Status: early.** Login, secure session storage, 12 core tools and media
+> tools work (see [Roadmap](#roadmap)).
 
 ## Install
 
@@ -73,6 +73,8 @@ claude mcp add telegram -- telegram-mcp serve
 | `search_contacts` | `edit_message` (destructive) |
 | `list_messages` | `delete_message` (destructive) |
 | `search_messages` | `mark_as_read` |
+| `get_media_info` | `download_media` (local disk only) |
+| `open_photo` | |
 
 Chats are addressed by the `id` from `list_chats` (Bot API style: users
 positive, groups negative, channels `-100…`), by `@username`, or `me`.
@@ -85,6 +87,8 @@ All optional, in `config.toml`:
 read_only = true                         # register only the read tools (also: serve --read-only)
 allowed_chat_ids = [123456789, -1001234567890]  # restrict every tool to these chats
 max_delete = 20                          # message IDs per delete_message call
+allowed_roots = ["~/Downloads/telegram-mcp"]  # where download_media may write (this is the default)
+max_download_mb = 50                     # per file
 ```
 
 - Text from Telegram is returned as JSON with invisible and control characters
@@ -94,6 +98,10 @@ max_delete = 20                          # message IDs per delete_message call
   and refuses otherwise.
 - Every write is appended to `audit.log` in the profile directory (tool, chat,
   message IDs, error) without message text.
+- `download_media` writes only inside `allowed_roots` (symlinks resolved, `..`
+  rejected), reduces file names to one safe component, never overwrites an
+  existing file, and checks the size before and during the download.
+- `open_photo` shows the model a copy scaled to at most 1280 px (5 MB cap).
 - Flood waits up to a minute are absorbed; each tool call times out after 55 s.
 
 ## How the session is stored
@@ -120,7 +128,7 @@ max_delete = 20                          # message IDs per delete_message call
 - [x] MCP server over stdio with flood-wait handling and per-tool timeouts
 - [x] 12 core tools (see [Tools](#tools))
 - [x] Safety: output sanitizing, chat allowlist, read-only mode, audit log
-- [ ] Media: `get_media_info`, `download_media` (allowed roots, size limit), `open_photo`
+- [x] Media: `get_media_info`, `download_media` (allowed roots, size limit), `open_photo`
 - [ ] Markdown/HTML formatting for sent messages, forum topics
 - [ ] `install-claude` helper, Homebrew tap, signed macOS builds
 

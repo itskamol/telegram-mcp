@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -35,10 +36,19 @@ type Config struct {
 	AllowedChatIDs []int64 `toml:"allowed_chat_ids"`
 	// MaxDelete caps message IDs per delete_message call. Default 20.
 	MaxDelete int `toml:"max_delete"`
+
+	// AllowedRoots are the only directories download_media may write into;
+	// "~/" is expanded. Default: ~/Downloads/telegram-mcp.
+	AllowedRoots []string `toml:"allowed_roots"`
+	// MaxDownloadMB caps a single download_media file. Default 50.
+	MaxDownloadMB int `toml:"max_download_mb"`
 }
 
-// DefaultMaxDelete is used when max_delete is unset.
-const DefaultMaxDelete = 20
+// Defaults used when the setting is unset.
+const (
+	DefaultMaxDelete     = 20
+	DefaultMaxDownloadMB = 50
+)
 
 // Paths holds every file location the binary touches.
 type Paths struct {
@@ -94,6 +104,22 @@ func Load(p Paths) (Config, error) {
 	}
 	if c.MaxDelete <= 0 {
 		c.MaxDelete = DefaultMaxDelete
+	}
+	if c.MaxDownloadMB <= 0 {
+		c.MaxDownloadMB = DefaultMaxDownloadMB
+	}
+	home, _ := os.UserHomeDir()
+	if len(c.AllowedRoots) == 0 && home != "" {
+		c.AllowedRoots = []string{filepath.Join(home, "Downloads", appName)}
+	}
+	for i, r := range c.AllowedRoots {
+		if strings.HasPrefix(r, "~/") && home != "" {
+			r = filepath.Join(home, r[2:])
+		}
+		if !filepath.IsAbs(r) {
+			return Config{}, fmt.Errorf("allowed_roots: %q must be an absolute path", r)
+		}
+		c.AllowedRoots[i] = filepath.Clean(r)
 	}
 	return c, nil
 }

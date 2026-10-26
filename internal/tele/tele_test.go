@@ -59,3 +59,22 @@ func TestMediaKind(t *testing.T) {
 		t.Fatalf("nil: %q", got)
 	}
 }
+
+func TestPickPhotoSize(t *testing.T) {
+	sizes := []tg.PhotoSizeClass{
+		&tg.PhotoStrippedSize{Type: "i"},
+		&tg.PhotoSize{Type: "s", W: 90, H: 60, Size: 1000},
+		&tg.PhotoSize{Type: "x", W: 800, H: 533, Size: 50000},
+		&tg.PhotoSizeProgressive{Type: "y", W: 1280, H: 853, Sizes: []int{10, 90000}},
+		&tg.PhotoSizeProgressive{Type: "w", W: 2560, H: 1706, Sizes: []int{10, 300000}},
+	}
+	if got := pickPhotoSize(sizes, 0); got.Type != "w" || got.Size != 300000 {
+		t.Fatalf("largest: %+v", got)
+	}
+	if got := pickPhotoSize(sizes, 1280); got.Type != "y" {
+		t.Fatalf("<=1280: %+v", got)
+	}
+	if got := pickPhotoSize(sizes, 50); got.Type != "s" {
+		t.Fatalf("fallback to smallest: %+v", got)
+	}
+}

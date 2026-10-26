@@ -50,14 +50,17 @@ func toolNames(t *testing.T, cs *mcp.ClientSession) map[string]*mcp.Tool {
 }
 
 var (
-	readTools  = []string{"get_me", "list_chats", "resolve_username", "search_contacts", "list_messages", "search_messages"}
+	readTools  = []string{"get_me", "list_chats", "resolve_username", "search_contacts", "list_messages", "search_messages", "get_media_info", "open_photo"}
 	writeTools = []string{"send_message", "reply_to_message", "forward_message", "edit_message", "delete_message", "mark_as_read"}
 )
 
 func TestToolList(t *testing.T) {
 	tools := toolNames(t, connect(t, Policy{MaxDelete: 20}))
-	if len(tools) != 12 {
-		t.Fatalf("got %d tools, want 12", len(tools))
+	if len(tools) != 15 {
+		t.Fatalf("got %d tools, want 15", len(tools))
+	}
+	if dl := tools["download_media"]; dl == nil || dl.Annotations.ReadOnlyHint || *dl.Annotations.DestructiveHint {
+		t.Error("download_media missing or mis-annotated")
 	}
 	for _, n := range readTools {
 		if tl := tools[n]; tl == nil || !tl.Annotations.ReadOnlyHint {
@@ -84,13 +87,14 @@ func TestReadOnlyHidesWriteTools(t *testing.T) {
 			t.Errorf("%s registered in read-only mode", n)
 		}
 	}
-	if len(tools) != len(readTools) {
-		t.Fatalf("got %d tools, want %d", len(tools), len(readTools))
+	// download_media only writes to local disk, so read-only keeps it.
+	if len(tools) != len(readTools)+1 || tools["download_media"] == nil {
+		t.Fatalf("got %d tools, want read tools + download_media", len(tools))
 	}
 }
 
 func TestValidationBeforeTelegram(t *testing.T) {
-	cs := connect(t, Policy{MaxDelete: 2})
+	cs := connect(t, Policy{MaxDelete: 2, AllowedRoots: []string{t.TempDir()}})
 	cases := []struct {
 		tool string
 		args map[string]any
@@ -103,6 +107,9 @@ func TestValidationBeforeTelegram(t *testing.T) {
 		{"delete_message", map[string]any{"chat": "me", "message_ids": []int{}}, "empty"},
 		{"forward_message", map[string]any{"from_chat": "me", "to_chat": "me", "message_ids": []int{}}, "1 to 100"},
 		{"search_messages", map[string]any{"chat": "me", "query": ""}, "query is empty"},
+		{"download_media", map[string]any{"chat": "me", "message_id": 1, "dir": "../../etc"}, "outside allowed_roots"},
+		{"download_media", map[string]any{"chat": "me", "message_id": 1, "dir": "/etc"}, "outside allowed_roots"},
+		{"open_photo", map[string]any{"chat": "me", "message_id": 0}, "message_id is required"},
 	}
 	for _, c := range cases {
 		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: c.tool, Arguments: c.args})

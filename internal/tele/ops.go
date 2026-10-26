@@ -126,21 +126,9 @@ func (s *Service) Search(ctx context.Context, r Resolved, q string, limit int) (
 // Get fetches specific messages of one chat. IDs that do not exist or
 // belong to another chat are left out.
 func (s *Service) Get(ctx context.Context, r Resolved, ids []int) ([]Message, error) {
-	in := make([]tg.InputMessageClass, len(ids))
-	for i, id := range ids {
-		in[i] = &tg.InputMessageID{ID: id}
-	}
-	var res tg.MessagesMessagesClass
-	var err error
-	if ch, ok := r.InputChannel(); ok {
-		res, err = s.API.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{Channel: ch, ID: in})
-	} else {
-		// Outside channels message IDs are per account, not per chat: this
-		// returns whatever chat each ID lives in, so filter by chat below.
-		res, err = s.API.MessagesGetMessages(ctx, in)
-	}
+	res, err := s.fetch(ctx, r, ids)
 	if err != nil {
-		return nil, fmt.Errorf("get messages: %w", err)
+		return nil, err
 	}
 	msgs, err := s.messages(ctx, res)
 	if err != nil {

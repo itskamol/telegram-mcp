@@ -186,6 +186,8 @@ func runServe(ctx context.Context, args []string) error {
 				ReadOnly:       *readOnly || e.cfg.ReadOnly,
 				AllowedChatIDs: e.cfg.AllowedChatIDs,
 				MaxDelete:      e.cfg.MaxDelete,
+				AllowedRoots:   e.cfg.AllowedRoots,
+				MaxDownload:    int64(e.cfg.MaxDownloadMB) << 20,
 			}, auditLog, version)
 			fmt.Fprintf(os.Stderr, "telegram-mcp %s serving %s on stdio\n", version, describe(self))
 			return srv.Run(ctx, &mcp.StdioTransport{})
