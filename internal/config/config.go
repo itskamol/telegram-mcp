@@ -42,12 +42,15 @@ type Config struct {
 	AllowedRoots []string `toml:"allowed_roots"`
 	// MaxDownloadMB caps a single download_media file. Default 50.
 	MaxDownloadMB int `toml:"max_download_mb"`
+	// MaxUploadMB caps a single send_file file. Default 50.
+	MaxUploadMB int `toml:"max_upload_mb"`
 }
 
 // Defaults used when the setting is unset.
 const (
 	DefaultMaxDelete     = 20
 	DefaultMaxDownloadMB = 50
+	DefaultMaxUploadMB   = 50
 )
 
 // Load reads config.toml if present and applies TELEGRAM_API_ID /
@@ -72,6 +75,9 @@ func Load(p Paths) (Config, error) {
 	}
 	if c.MaxDownloadMB <= 0 {
 		c.MaxDownloadMB = DefaultMaxDownloadMB
+	}
+	if c.MaxUploadMB <= 0 {
+		c.MaxUploadMB = DefaultMaxUploadMB
 	}
 	home, _ := os.UserHomeDir()
 	if len(c.AllowedRoots) == 0 && home != "" {

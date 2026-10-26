@@ -202,6 +202,7 @@ func runServe(ctx context.Context, args []string) error {
 				MaxDelete:      e.cfg.MaxDelete,
 				AllowedRoots:   e.cfg.AllowedRoots,
 				MaxDownload:    int64(e.cfg.MaxDownloadMB) << 20,
+				MaxUpload:      int64(e.cfg.MaxUploadMB) << 20,
 			}, auditLog, version)
 			fmt.Fprintf(os.Stderr, "telegram-mcp %s serving %s on stdio\n", version, describe(self))
 			return srv.Run(ctx, &mcp.StdioTransport{})

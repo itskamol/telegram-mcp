@@ -7,6 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -115,4 +121,73 @@ func (s *Server) openPhoto(ctx context.Context, _ *mcp.CallToolRequest, in media
 		&mcp.ImageContent{Data: buf.Bytes, MIMEType: f.Info.MimeType},
 		&mcp.TextContent{Text: string(meta)},
 	}}, nil, nil
+}
+
+// maxCaptionLen is Telegram's caption limit for non-premium accounts.
+const maxCaptionLen = 1024
+
+// maxPhotoSize is the largest file Telegram accepts as a compressed photo.
+const maxPhotoSize = 10 << 20
+
+type sendFileIn struct {
+	Chat       string `json:"chat" jsonschema:"chat id (as a string), @username, or me"`
+	Path       string `json:"path" jsonschema:"file inside allowed_roots; relative paths are under the first root"`
+	Caption    string `json:"caption,omitempty" jsonschema:"optional caption, up to 1024 characters after formatting"`
+	ParseMode  string `json:"parse_mode,omitempty" jsonschema:"plain (default) or html, for the caption"`
+	AsDocument bool   `json:"as_document,omitempty" jsonschema:"send images as files instead of compressed photos"`
+	ReplyTo    int    `json:"reply_to,omitempty" jsonschema:"message id to reply to"`
+	TopicID    int    `json:"topic_id,omitempty" jsonschema:"forum topic id from list_topics"`
+}
+
+func (s *Server) sendFile(ctx context.Context, _ *mcp.CallToolRequest, in sendFileIn) (*mcp.CallToolResult, sentOut, error) {
+	// The file check comes first: it is the guard against exfiltration.
+	f, fi, err := fsguard.OpenFile(s.policy.AllowedRoots, in.Path)
+	if err != nil {
+		return nil, sentOut{}, err
+	}
+	defer f.Close()
+	if fi.Size() == 0 {
+		return nil, sentOut{}, errors.New("file is empty")
+	}
+	if fi.Size() > s.policy.MaxUpload {
+		return nil, sentOut{}, fmt.Errorf("file is %d MB; max_upload_mb allows %d MB", fi.Size()>>20, s.policy.MaxUpload>>20)
+	}
+
+	var caption tele.Formatted
+	if in.Caption != "" {
+		if caption, err = s.format(ctx, in.Caption, in.ParseMode); err != nil {
+			return nil, sentOut{}, fmt.Errorf("caption: %w", err)
+		}
+		if n := utf8.RuneCountInString(caption.Text); n > maxCaptionLen {
+			return nil, sentOut{}, fmt.Errorf("caption is %d characters; Telegram allows %d", n, maxCaptionLen)
+		}
+	}
+
+	r, err := s.chat(ctx, in.Chat)
+	if err != nil {
+		return nil, sentOut{}, err
+	}
+	mimeType := sniffMIME(f, fi.Name())
+	up := tele.Upload{
+		File: f, Size: fi.Size(), Name: fi.Name(), MimeType: mimeType,
+		AsPhoto: !in.AsDocument && fi.Size() <= maxPhotoSize &&
+			(mimeType == "image/jpeg" || mimeType == "image/png" || mimeType == "image/webp"),
+	}
+	id, err := s.svc.SendFile(ctx, r, up, caption, in.ReplyTo, in.TopicID)
+	if err := s.record(audit.Entry{Tool: "send_file", ChatID: r.Marked, IDs: nonZero(id), Path: f.Name()}, err); err != nil {
+		return nil, sentOut{}, err
+	}
+	return nil, sentOut{ChatID: r.Marked, MessageID: id}, nil
+}
+
+// sniffMIME guesses the type from the extension, then from the content.
+func sniffMIME(f *os.File, name string) string {
+	if t := mime.TypeByExtension(strings.ToLower(filepath.Ext(name))); t != "" {
+		t, _, _ = strings.Cut(t, ";")
+		return t
+	}
+	head := make([]byte, 512)
+	n, _ := f.ReadAt(head, 0)
+	t, _, _ := strings.Cut(http.DetectContentType(head[:n]), ";")
+	return t
 }

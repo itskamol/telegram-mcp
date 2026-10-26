@@ -165,3 +165,75 @@ func (b *LimitedBuffer) Write(p []byte) (int, error) {
 	b.Bytes = append(b.Bytes, p...)
 	return len(p), nil
 }
+
+// OpenFile opens an existing regular file inside one of roots for reading.
+//
+// It is the read-side twin of ResolveDir, used to send local files, which
+// is the dangerous direction: a prompt-injected model could try to send
+// ~/.ssh/id_ed25519 or a .env. So besides staying inside a root, no path
+// component below the root may be hidden (start with '.'), before or after
+// resolving symlinks, and the opened file must be the one that was checked.
+// A relative path is taken relative to the first root.
+func OpenFile(roots []string, path string) (*os.File, os.FileInfo, error) {
+	if len(roots) == 0 {
+		return nil, nil, errors.New("no allowed_roots configured")
+	}
+	if path == "" {
+		return nil, nil, errors.New("path is empty")
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(roots[0], path)
+	}
+	path = filepath.Clean(path)
+	outside := fmt.Errorf("%s is outside allowed_roots (%s)", path, strings.Join(roots, ", "))
+	if !slices.ContainsFunc(roots, func(r string) bool { return within(r, path) && !hiddenBelow(r, path) }) {
+		return nil, nil, outside
+	}
+
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s does not exist", path)
+	}
+	inRoot := false
+	for _, root := range roots {
+		if rr, err := filepath.EvalSymlinks(root); err == nil && within(rr, real) && !hiddenBelow(rr, real) {
+			inRoot = true
+			break
+		}
+	}
+	if !inRoot {
+		return nil, nil, outside // a symlink inside a root points out of it, or at a hidden file
+	}
+
+	f, err := os.Open(real)
+	if err != nil {
+		return nil, nil, err
+	}
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a regular file", path)
+	}
+	if err == nil {
+		// The path may have been swapped between the check and the open.
+		var now os.FileInfo
+		if now, err = os.Stat(real); err == nil && !os.SameFile(fi, now) {
+			err = fmt.Errorf("%s changed while it was being opened", path)
+		}
+	}
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	return f, fi, nil
+}
+
+// hiddenBelow reports whether any component of path under root starts with '.'.
+func hiddenBelow(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." {
+		return false
+	}
+	return slices.ContainsFunc(strings.Split(rel, string(filepath.Separator)), func(c string) bool {
+		return strings.HasPrefix(c, ".")
+	})
+}

@@ -33,6 +33,7 @@ type Policy struct {
 	MaxDelete      int
 	AllowedRoots   []string // download_media writes only here
 	MaxDownload    int64    // bytes per download_media file
+	MaxUpload      int64    // bytes per send_file file
 }
 
 func (p Policy) allows(marked int64) bool {
@@ -89,6 +90,9 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string) 
 		"Replace the text of a message you sent. Only your own messages can be edited.", s.editMessage)
 	addWrite(srv, "delete_message", "Delete Message", true,
 		"Delete messages from a chat. revoke=true deletes them for everyone; channel messages are always deleted for everyone.", s.deleteMessage)
+	addWrite(srv, "send_file", "Send File", false,
+		"Send a local file from allowed_roots (photo, document, video...) with an optional caption."+
+			" Hidden files and anything outside allowed_roots are refused.", s.sendFile)
 	addWrite(srv, "mark_as_read", "Mark As Read", false, "Mark all messages in a chat as read.", s.markAsRead)
 	return srv
 }

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"os"
 
 	"github.com/gotd/td/telegram/downloader"
+	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 
 	"github.com/itskamol/telegram-mcp-go/internal/sanitize"
@@ -198,4 +200,42 @@ func (s *Service) fetch(ctx context.Context, r Resolved, ids []int) (tg.Messages
 		return nil, fmt.Errorf("get messages: %w", err)
 	}
 	return res, nil
+}
+
+// Upload is a local file to send.
+type Upload struct {
+	File     *os.File
+	Size     int64
+	Name     string
+	MimeType string
+	AsPhoto  bool // send as a compressed photo instead of a document
+}
+
+// SendFile uploads a file and posts it with an optional caption, reply and
+// topic. It returns the new message ID.
+func (s *Service) SendFile(ctx context.Context, r Resolved, up Upload, caption Formatted, replyTo, topicID int) (int, error) {
+	in, err := uploader.NewUploader(s.API).Upload(ctx, uploader.NewUpload(up.Name, up.File, up.Size))
+	if err != nil {
+		return 0, fmt.Errorf("upload: %w", err)
+	}
+	var media tg.InputMediaClass
+	if up.AsPhoto {
+		media = &tg.InputMediaUploadedPhoto{File: in}
+	} else {
+		media = &tg.InputMediaUploadedDocument{
+			File:       in,
+			MimeType:   up.MimeType,
+			ForceFile:  true,
+			Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: up.Name}},
+		}
+	}
+	req := &tg.MessagesSendMediaRequest{
+		Peer: r.Input, Media: media, Message: caption.Text, Entities: caption.Entities, RandomID: randomID(),
+		ReplyTo: replyTarget(replyTo, topicID),
+	}
+	upd, err := s.API.MessagesSendMedia(ctx, req)
+	if err != nil {
+		return 0, fmt.Errorf("send file: %w", err)
+	}
+	return sentID(upd, req.RandomID), nil
 }

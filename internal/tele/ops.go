@@ -144,21 +144,29 @@ func (s *Service) Get(ctx context.Context, r Resolved, ids []int) ([]Message, er
 // Send posts text, optionally as a reply and/or into a forum topic, and
 // returns the new message ID.
 func (s *Service) Send(ctx context.Context, r Resolved, f Formatted, replyTo, topicID int) (int, error) {
-	req := &tg.MessagesSendMessageRequest{Peer: r.Input, Message: f.Text, Entities: f.Entities, RandomID: randomID()}
-	switch {
-	case replyTo != 0 && topicID != 0:
-		req.ReplyTo = &tg.InputReplyToMessage{ReplyToMsgID: replyTo, TopMsgID: topicID}
-	case replyTo != 0:
-		req.ReplyTo = &tg.InputReplyToMessage{ReplyToMsgID: replyTo}
-	case topicID != 0:
-		// A topic is addressed by replying to its first message.
-		req.ReplyTo = &tg.InputReplyToMessage{ReplyToMsgID: topicID}
+	req := &tg.MessagesSendMessageRequest{
+		Peer: r.Input, Message: f.Text, Entities: f.Entities, RandomID: randomID(),
+		ReplyTo: replyTarget(replyTo, topicID),
 	}
 	upd, err := s.API.MessagesSendMessage(ctx, req)
 	if err != nil {
 		return 0, fmt.Errorf("send message: %w", err)
 	}
 	return sentID(upd, req.RandomID), nil
+}
+
+// replyTarget builds reply_to for a reply and/or a forum topic; nil if neither.
+func replyTarget(replyTo, topicID int) tg.InputReplyToClass {
+	switch {
+	case replyTo != 0 && topicID != 0:
+		return &tg.InputReplyToMessage{ReplyToMsgID: replyTo, TopMsgID: topicID}
+	case replyTo != 0:
+		return &tg.InputReplyToMessage{ReplyToMsgID: replyTo}
+	case topicID != 0:
+		// A topic is addressed by replying to its first message.
+		return &tg.InputReplyToMessage{ReplyToMsgID: topicID}
+	}
+	return nil
 }
 
 // Forward copies messages from one chat to another and returns the new IDs.

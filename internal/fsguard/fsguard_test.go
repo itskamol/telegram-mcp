@@ -94,3 +94,56 @@ func TestWriteNewNeverOverwrites(t *testing.T) {
 		t.Fatalf("leftover files after failed write: %v", entries)
 	}
 }
+
+func TestOpenFile(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	mk := func(p, body string) string {
+		t.Helper()
+		full := filepath.Join(root, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return full
+	}
+	mk("photo.jpg", "img")
+	mk("sub/doc.pdf", "pdf")
+	mk(".env", "SECRET=1")
+	mk(".ssh/id_ed25519", "key")
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("s"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(root, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, ".env"), filepath.Join(root, "innocent.txt")); err != nil {
+		t.Fatal(err)
+	}
+	roots := []string{root}
+
+	for _, ok := range []string{"photo.jpg", "sub/doc.pdf", filepath.Join(root, "photo.jpg")} {
+		f, fi, err := OpenFile(roots, ok)
+		if err != nil {
+			t.Errorf("%q rejected: %v", ok, err)
+			continue
+		}
+		if fi.Size() == 0 {
+			t.Errorf("%q: empty stat", ok)
+		}
+		f.Close()
+	}
+	for _, bad := range []string{"", ".env", ".ssh/id_ed25519", "sub/../.env", "../x", secret,
+		"link.txt", "innocent.txt", "sub", "missing.txt"} {
+		if f, _, err := OpenFile(roots, bad); err == nil {
+			f.Close()
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if _, _, err := OpenFile(nil, "photo.jpg"); err == nil {
+		t.Error("no roots accepted")
+	}
+}

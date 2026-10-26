@@ -5,7 +5,7 @@ binary: no Python, no `uv`, no Docker. It is a focused Go rewrite inspired by
 [chigwell/telegram-mcp](https://github.com/chigwell/telegram-mcp), built on
 [gotd/td](https://github.com/gotd/td).
 
-> **Status: early.** Login, secure session storage, 16 tools (messages, media,
+> **Status: early.** Login, secure session storage, 17 tools (messages, media,
 > forum topics, HTML formatting) and one-command install work (see [Roadmap](#roadmap)).
 
 ## Install
@@ -90,7 +90,7 @@ claude mcp add telegram -- telegram-mcp serve
 | `search_contacts` | `edit_message` (destructive) |
 | `list_messages` | `delete_message` (destructive) |
 | `search_messages` | `mark_as_read` |
-| `list_topics` | |
+| `list_topics` | `send_file` |
 | `get_media_info` | `download_media` (local disk only) |
 | `open_photo` | |
 
@@ -114,6 +114,7 @@ allowed_chat_ids = [123456789, -1001234567890]  # restrict every tool to these c
 max_delete = 20                          # message IDs per delete_message call
 allowed_roots = ["~/Downloads/telegram-mcp"]  # where download_media may write (this is the default)
 max_download_mb = 50                     # per file
+max_upload_mb = 50                       # per send_file file
 ```
 
 - Text from Telegram is returned as JSON with invisible and control characters
@@ -126,6 +127,10 @@ max_download_mb = 50                     # per file
 - `download_media` writes only inside `allowed_roots` (symlinks resolved, `..`
   rejected), reduces file names to one safe component, never overwrites an
   existing file, and checks the size before and during the download.
+- `send_file` is the risky direction (local files leave the machine), so it
+  only reads regular files inside `allowed_roots`, refuses hidden paths such
+  as `.env` or `.ssh/` (also through symlinks), and checks that the file it
+  opened is the one it validated.
 - `open_photo` shows the model a copy scaled to at most 1280 px (5 MB cap).
 - Flood waits up to a minute are absorbed; each tool call times out after 55 s.
 

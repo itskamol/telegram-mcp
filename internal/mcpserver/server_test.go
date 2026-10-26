@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -51,13 +52,13 @@ func toolNames(t *testing.T, cs *mcp.ClientSession) map[string]*mcp.Tool {
 
 var (
 	readTools  = []string{"get_me", "list_chats", "resolve_username", "search_contacts", "list_messages", "search_messages", "list_topics", "get_media_info", "open_photo"}
-	writeTools = []string{"send_message", "reply_to_message", "forward_message", "edit_message", "delete_message", "mark_as_read"}
+	writeTools = []string{"send_message", "reply_to_message", "forward_message", "edit_message", "delete_message", "mark_as_read", "send_file"}
 )
 
 func TestToolList(t *testing.T) {
 	tools := toolNames(t, connect(t, Policy{MaxDelete: 20}))
-	if len(tools) != 16 {
-		t.Fatalf("got %d tools, want 16", len(tools))
+	if len(tools) != 17 {
+		t.Fatalf("got %d tools, want 17", len(tools))
 	}
 	if dl := tools["download_media"]; dl == nil || dl.Annotations.ReadOnlyHint || *dl.Annotations.DestructiveHint {
 		t.Error("download_media missing or mis-annotated")
@@ -140,5 +141,49 @@ func TestAllowlist(t *testing.T) {
 	}
 	if !slices.Equal(p.AllowedChatIDs, []int64{42, -1001234}) {
 		t.Fatal("allowlist mutated")
+	}
+}
+
+func TestSendFileGuards(t *testing.T) {
+	root := t.TempDir()
+	write := func(name string, size int) {
+		t.Helper()
+		full := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, make([]byte, size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("ok.jpg", 10)
+	write("empty.txt", 0)
+	write("big.bin", 2048)
+	write(".env", 10)
+	cs := connect(t, Policy{AllowedRoots: []string{root}, MaxUpload: 1024, MaxDelete: 20})
+
+	cases := []struct {
+		args map[string]any
+		want string
+	}{
+		{map[string]any{"chat": "me", "path": "/etc/passwd"}, "outside allowed_roots"},
+		{map[string]any{"chat": "me", "path": "../../etc/passwd"}, "outside allowed_roots"},
+		{map[string]any{"chat": "me", "path": ".env"}, "outside allowed_roots"},
+		{map[string]any{"chat": "me", "path": "missing.jpg"}, "does not exist"},
+		{map[string]any{"chat": "me", "path": "empty.txt"}, "empty"},
+		{map[string]any{"chat": "me", "path": "big.bin"}, "max_upload_mb"},
+		{map[string]any{"chat": "me", "path": "ok.jpg", "caption": strings.Repeat("x", 1025)}, "1024"},
+		{map[string]any{"chat": "me", "path": "ok.jpg", "caption": "<b>x</i>", "parse_mode": "html"}, "invalid HTML"},
+	}
+	for _, c := range cases {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "send_file", Arguments: c.args})
+		if err != nil {
+			t.Errorf("%v: protocol error %v", c.args["path"], err)
+			continue
+		}
+		text := res.Content[0].(*mcp.TextContent).Text
+		if !res.IsError || !strings.Contains(text, c.want) {
+			t.Errorf("%v: IsError=%v %q, want %q", c.args["path"], res.IsError, text, c.want)
+		}
 	}
 }
