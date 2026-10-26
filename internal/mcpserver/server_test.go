@@ -50,14 +50,14 @@ func toolNames(t *testing.T, cs *mcp.ClientSession) map[string]*mcp.Tool {
 }
 
 var (
-	readTools  = []string{"get_me", "list_chats", "resolve_username", "search_contacts", "list_messages", "search_messages", "get_media_info", "open_photo"}
+	readTools  = []string{"get_me", "list_chats", "resolve_username", "search_contacts", "list_messages", "search_messages", "list_topics", "get_media_info", "open_photo"}
 	writeTools = []string{"send_message", "reply_to_message", "forward_message", "edit_message", "delete_message", "mark_as_read"}
 )
 
 func TestToolList(t *testing.T) {
 	tools := toolNames(t, connect(t, Policy{MaxDelete: 20}))
-	if len(tools) != 15 {
-		t.Fatalf("got %d tools, want 15", len(tools))
+	if len(tools) != 16 {
+		t.Fatalf("got %d tools, want 16", len(tools))
 	}
 	if dl := tools["download_media"]; dl == nil || dl.Annotations.ReadOnlyHint || *dl.Annotations.DestructiveHint {
 		t.Error("download_media missing or mis-annotated")
@@ -110,6 +110,11 @@ func TestValidationBeforeTelegram(t *testing.T) {
 		{"download_media", map[string]any{"chat": "me", "message_id": 1, "dir": "../../etc"}, "outside allowed_roots"},
 		{"download_media", map[string]any{"chat": "me", "message_id": 1, "dir": "/etc"}, "outside allowed_roots"},
 		{"open_photo", map[string]any{"chat": "me", "message_id": 0}, "message_id is required"},
+		{"send_message", map[string]any{"chat": "me", "text": "**hi**", "parse_mode": "markdown"}, "parse_mode must be"},
+		{"send_message", map[string]any{"chat": "me", "text": "<b>x</i>", "parse_mode": "html"}, "invalid HTML"},
+		{"edit_message", map[string]any{"chat": "me", "message_id": 5, "text": "<b> </b>", "parse_mode": "html"}, "text is empty"},
+		// The 4096 limit applies to the text after tags are removed.
+		{"send_message", map[string]any{"chat": "me", "parse_mode": "html", "text": "<b>" + strings.Repeat("x", 4097) + "</b>"}, "4096"},
 	}
 	for _, c := range cases {
 		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: c.tool, Arguments: c.args})

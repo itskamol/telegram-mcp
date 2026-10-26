@@ -5,13 +5,22 @@ binary: no Python, no `uv`, no Docker. It is a focused Go rewrite inspired by
 [chigwell/telegram-mcp](https://github.com/chigwell/telegram-mcp), built on
 [gotd/td](https://github.com/gotd/td).
 
-> **Status: early.** Login, secure session storage, 12 core tools and media
-> tools work (see [Roadmap](#roadmap)).
+> **Status: early.** Login, secure session storage, 16 tools (messages, media,
+> forum topics, HTML formatting) and one-command install work (see [Roadmap](#roadmap)).
 
 ## Install
 
-Download the archive for your OS from
-[Releases](../../releases), unpack it and put `telegram-mcp` on your `PATH`.
+macOS and Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/itskamol/telegram-mcp-go/main/install.sh | sh
+```
+
+It downloads the latest release for your OS and CPU, verifies its SHA-256
+against `checksums.txt` and installs `telegram-mcp` into `~/.local/bin`
+(`BIN_DIR=/usr/local/bin` to change, `VERSION=v0.2.0` to pin).
+
+Windows: download the zip from [Releases](../../releases).
 
 Or build from source (Go 1.26+):
 
@@ -43,7 +52,16 @@ several accounts side by side.
 
 ## Use with Claude
 
-Add to `claude_desktop_config.json` (no secrets go here):
+```bash
+telegram-mcp install claude-desktop   # edits claude_desktop_config.json, keeps a .bak
+telegram-mcp install claude-code      # runs `claude mcp add --scope user ...`
+```
+
+Options: `--name telegram`, `--read-only`, `--account work`, `--force` (replace
+an existing entry with the same name). Only the binary path and arguments are
+written; no secrets go into client configs.
+
+Or by hand, in `claude_desktop_config.json`:
 
 ```json
 {
@@ -72,8 +90,16 @@ claude mcp add telegram -- telegram-mcp serve
 | `search_contacts` | `edit_message` (destructive) |
 | `list_messages` | `delete_message` (destructive) |
 | `search_messages` | `mark_as_read` |
+| `list_topics` | |
 | `get_media_info` | `download_media` (local disk only) |
 | `open_photo` | |
+
+`send_message`, `reply_to_message` and `edit_message` take `parse_mode`:
+`plain` (default) or `html` (Telegram HTML: `<b> <i> <u> <s> <code> <pre>
+<a href> <blockquote> <tg-spoiler>`). Formatting is parsed locally, so broken
+HTML fails before anything is sent. In forum supergroups, `list_topics` gives
+topic IDs for the `topic_id` argument of `list_messages`, `send_message` and
+`reply_to_message`.
 
 Chats are addressed by the `id` from `list_chats` (Bot API style: users
 positive, groups negative, channels `-100…`), by `@username`, or `me`.
@@ -146,8 +172,9 @@ destination file already exists or a server is still running from the old place.
 - [x] 12 core tools (see [Tools](#tools))
 - [x] Safety: output sanitizing, chat allowlist, read-only mode, audit log
 - [x] Media: `get_media_info`, `download_media` (allowed roots, size limit), `open_photo`
-- [ ] Markdown/HTML formatting for sent messages, forum topics
-- [ ] `install-claude` helper, Homebrew tap, signed macOS builds
+- [x] HTML formatting for sent messages, forum topics
+- [x] One-line installer, `install claude-desktop|claude-code`
+- [ ] Homebrew tap, signed and notarized macOS builds
 
 ## License
 

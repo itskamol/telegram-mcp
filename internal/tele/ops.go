@@ -141,11 +141,18 @@ func (s *Service) Get(ctx context.Context, r Resolved, ids []int) ([]Message, er
 	return slices.DeleteFunc(msgs, func(m Message) bool { return m.ChatID != r.Marked || m.Service == "empty" }), nil
 }
 
-// Send posts text, optionally as a reply, and returns the new message ID.
-func (s *Service) Send(ctx context.Context, r Resolved, text string, replyTo int) (int, error) {
-	req := &tg.MessagesSendMessageRequest{Peer: r.Input, Message: text, RandomID: randomID()}
-	if replyTo != 0 {
+// Send posts text, optionally as a reply and/or into a forum topic, and
+// returns the new message ID.
+func (s *Service) Send(ctx context.Context, r Resolved, f Formatted, replyTo, topicID int) (int, error) {
+	req := &tg.MessagesSendMessageRequest{Peer: r.Input, Message: f.Text, Entities: f.Entities, RandomID: randomID()}
+	switch {
+	case replyTo != 0 && topicID != 0:
+		req.ReplyTo = &tg.InputReplyToMessage{ReplyToMsgID: replyTo, TopMsgID: topicID}
+	case replyTo != 0:
 		req.ReplyTo = &tg.InputReplyToMessage{ReplyToMsgID: replyTo}
+	case topicID != 0:
+		// A topic is addressed by replying to its first message.
+		req.ReplyTo = &tg.InputReplyToMessage{ReplyToMsgID: topicID}
 	}
 	upd, err := s.API.MessagesSendMessage(ctx, req)
 	if err != nil {
@@ -176,8 +183,10 @@ func (s *Service) Forward(ctx context.Context, from Resolved, ids []int, to Reso
 }
 
 // Edit replaces a message's text.
-func (s *Service) Edit(ctx context.Context, r Resolved, id int, text string) error {
-	_, err := s.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{Peer: r.Input, ID: id, Message: text})
+func (s *Service) Edit(ctx context.Context, r Resolved, id int, f Formatted) error {
+	_, err := s.API.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+		Peer: r.Input, ID: id, Message: f.Text, Entities: f.Entities,
+	})
 	if err != nil {
 		return fmt.Errorf("edit message: %w", err)
 	}

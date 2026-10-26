@@ -4,6 +4,7 @@
 //	telegram-mcp login [--qr] [--phone +998...] [--account name]
 //	telegram-mcp status [--account name]
 //	telegram-mcp logout [--account name]
+//	telegram-mcp install claude-desktop|claude-code [--name telegram] [--read-only] [--force]
 //	telegram-mcp version
 package main
 
@@ -13,7 +14,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +28,7 @@ import (
 
 	"github.com/itskamol/telegram-mcp-go/internal/audit"
 	"github.com/itskamol/telegram-mcp-go/internal/config"
+	"github.com/itskamol/telegram-mcp-go/internal/install"
 	"github.com/itskamol/telegram-mcp-go/internal/login"
 	"github.com/itskamol/telegram-mcp-go/internal/mcpserver"
 	"github.com/itskamol/telegram-mcp-go/internal/secret"
@@ -42,6 +46,7 @@ Usage:
   telegram-mcp login  [--qr] [--phone +998...] [--account name]
   telegram-mcp status [--account name]
   telegram-mcp logout [--account name]
+  telegram-mcp install claude-desktop|claude-code [--name telegram] [--read-only] [--force]
   telegram-mcp version
 
 Settings live in ~/.config/telegram-mcp/config.toml (see "status").
@@ -60,6 +65,8 @@ func main() {
 	switch cmd, args := os.Args[1], os.Args[2:]; cmd {
 	case "serve":
 		err = runServe(ctx, args)
+	case "install":
+		err = runInstall(ctx, args)
 	case "login":
 		err = runLogin(ctx, args)
 	case "status":
@@ -324,4 +331,63 @@ func describe(u *tg.User) string {
 		name += " @" + u.Username
 	}
 	return fmt.Sprintf("%s (id %d)", name, u.ID)
+}
+
+func runInstall(ctx context.Context, args []string) error {
+	if len(args) == 0 || (args[0] != "claude-desktop" && args[0] != "claude-code") {
+		return errors.New("usage: telegram-mcp install claude-desktop|claude-code [--name telegram] [--read-only] [--force] [--account name]")
+	}
+	target := args[0]
+	fs := flag.NewFlagSet("install", flag.ContinueOnError)
+	name := fs.String("name", "telegram", "MCP server name in the client")
+	readOnly := fs.Bool("read-only", false, "serve only the read tools")
+	force := fs.Bool("force", false, "replace an existing entry with the same name")
+	account := fs.String("account", config.DefaultAccount, "account label")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if err := config.ValidateAccount(*account); err != nil {
+		return err
+	}
+	exe, err := install.Executable()
+	if err != nil {
+		return err
+	}
+	serveArgs := []string{"serve"}
+	if *readOnly {
+		serveArgs = append(serveArgs, "--read-only")
+	}
+	if *account != config.DefaultAccount {
+		serveArgs = append(serveArgs, "--account", *account)
+	}
+
+	if target == "claude-code" {
+		cmdArgs := append([]string{"mcp", "add", "--scope", "user", *name, "--", exe}, serveArgs...)
+		claude, err := exec.LookPath("claude")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "claude CLI not found on PATH. Run this yourself:\n  claude %s\n", strings.Join(cmdArgs, " "))
+			return nil
+		}
+		cmd := exec.CommandContext(ctx, claude, cmdArgs...)
+		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+		return cmd.Run()
+	}
+
+	path, err := install.DesktopConfigPath()
+	if err != nil {
+		return err
+	}
+	changed, err := install.AddToDesktopConfig(path, *name, install.Server{Command: exe, Args: serveArgs}, *force)
+	if errors.Is(err, install.ErrExists) {
+		return fmt.Errorf("%q is already in %s with other settings; pick another --name or pass --force", *name, path)
+	}
+	if err != nil {
+		return err
+	}
+	if !changed {
+		fmt.Fprintf(os.Stderr, "Already installed as %q in %s.\n", *name, path)
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "Added %q to %s (previous version kept as .bak).\nRestart Claude Desktop to load it.\n", *name, path)
+	return nil
 }

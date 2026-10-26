@@ -78,3 +78,35 @@ func TestPickPhotoSize(t *testing.T) {
 		t.Fatalf("fallback to smallest: %+v", got)
 	}
 }
+
+func TestParseHTML(t *testing.T) {
+	f, err := ParseHTML(`<b>Salom</b>, <a href="https://example.uz">havola</a> 1 &lt; 2 <i>👋 hi</i>`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Text != "Salom, havola 1 < 2 👋 hi" {
+		t.Fatalf("text %q", f.Text)
+	}
+	if len(f.Entities) != 3 {
+		t.Fatalf("entities %v", f.Entities)
+	}
+	if b, ok := f.Entities[0].(*tg.MessageEntityBold); !ok || b.Offset != 0 || b.Length != 5 {
+		t.Errorf("bold %+v", f.Entities[0])
+	}
+	if u, ok := f.Entities[1].(*tg.MessageEntityTextURL); !ok || u.URL != "https://example.uz" {
+		t.Errorf("link %+v", f.Entities[1])
+	}
+	// Offsets are UTF-16 units: the emoji counts as 2.
+	if i, ok := f.Entities[2].(*tg.MessageEntityItalic); !ok || i.Offset != 20 || i.Length != 5 {
+		t.Errorf("italic %+v", f.Entities[2])
+	}
+
+	if _, err := ParseHTML("<b>x</i>", nil); err == nil {
+		t.Error("mismatched tags accepted")
+	}
+	// gotd drops a mention it cannot resolve instead of failing: the text
+	// stays, nobody gets mentioned.
+	if f, err := ParseHTML(`<a href="tg://user?id=1">x</a>`, nil); err != nil || f.Text != "x" || len(f.Entities) != 0 {
+		t.Errorf("unresolvable mention: %q %v %v", f.Text, f.Entities, err)
+	}
+}

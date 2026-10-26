@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/itskamol/telegram-mcp-go/internal/audit"
@@ -61,6 +62,8 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string) 
 		"List messages of a chat, newest first. Page back with offset_id = the smallest id you got."+untrusted, s.listMessages)
 	addRead(srv, "search_messages", "Search Messages",
 		"Search a chat's messages for text."+untrusted, s.searchMessages)
+	addRead(srv, "list_topics", "List Topics",
+		"List forum topics of a supergroup that has topics enabled. Use a topic's id as topic_id in list_messages, send_message and reply_to_message."+untrusted, s.listTopics)
 	addRead(srv, "get_media_info", "Get Media Info",
 		"Describe a message's attachment (kind, file name, type, size, dimensions) without downloading it."+untrusted, s.getMediaInfo)
 	addRead(srv, "open_photo", "Open Photo",
@@ -78,7 +81,7 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string) 
 	if policy.ReadOnly {
 		return srv
 	}
-	addWrite(srv, "send_message", "Send Message", false, "Send a text message to a chat.", s.sendMessage)
+	addWrite(srv, "send_message", "Send Message", false, "Send a text message to a chat. parse_mode: "+parseModeDesc+".", s.sendMessage)
 	addWrite(srv, "reply_to_message", "Reply To Message", false, "Reply to a specific message in a chat.", s.replyToMessage)
 	addWrite(srv, "forward_message", "Forward Message", false,
 		"Forward one or more messages from one chat to another.", s.forwardMessage)
@@ -228,6 +231,7 @@ type listMessagesIn struct {
 	Chat     string `json:"chat" jsonschema:"chat id from list_chats (as a string), @username, or me for Saved Messages"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"max messages, default 20, max 100"`
 	OffsetID int    `json:"offset_id,omitempty" jsonschema:"return messages older than this id; omit for the newest"`
+	TopicID  int    `json:"topic_id,omitempty" jsonschema:"forum topic id from list_topics; only that topic's messages"`
 }
 
 type messagesOut struct {
@@ -239,7 +243,12 @@ func (s *Server) listMessages(ctx context.Context, _ *mcp.CallToolRequest, in li
 	if err != nil {
 		return nil, messagesOut{}, err
 	}
-	msgs, err := s.svc.History(ctx, r, clamp(in.Limit, 20, 100), in.OffsetID)
+	var msgs []tele.Message
+	if in.TopicID > 0 {
+		msgs, err = s.svc.TopicHistory(ctx, r, in.TopicID, clamp(in.Limit, 20, 100), in.OffsetID)
+	} else {
+		msgs, err = s.svc.History(ctx, r, clamp(in.Limit, 20, 100), in.OffsetID)
+	}
 	if err != nil {
 		return nil, messagesOut{}, err
 	}
@@ -274,37 +283,65 @@ type sentOut struct {
 	MessageID int   `json:"message_id,omitempty"`
 }
 
+const parseModeDesc = `"plain" (default) or "html": Telegram HTML with <b>, <i>, <u>, <s>, <code>, <pre>, <a href>, <blockquote>, <tg-spoiler>; escape < > & as &lt; &gt; &amp;`
+
 type sendIn struct {
-	Chat string `json:"chat" jsonschema:"chat id (as a string), @username, or me"`
-	Text string `json:"text" jsonschema:"message text, up to 4096 characters"`
+	Chat      string `json:"chat" jsonschema:"chat id (as a string), @username, or me"`
+	Text      string `json:"text" jsonschema:"message text, up to 4096 characters after formatting"`
+	ParseMode string `json:"parse_mode,omitempty" jsonschema:"plain (default) or html"`
+	TopicID   int    `json:"topic_id,omitempty" jsonschema:"forum topic id from list_topics, to post into that topic"`
 }
 
 func (s *Server) sendMessage(ctx context.Context, _ *mcp.CallToolRequest, in sendIn) (*mcp.CallToolResult, sentOut, error) {
-	return s.send(ctx, "send_message", in.Chat, in.Text, 0)
+	return s.send(ctx, "send_message", in.Chat, in.Text, in.ParseMode, 0, in.TopicID)
 }
 
 type replyIn struct {
 	Chat      string `json:"chat" jsonschema:"chat id (as a string), @username, or me"`
 	MessageID int    `json:"message_id" jsonschema:"id of the message to reply to"`
-	Text      string `json:"text" jsonschema:"reply text, up to 4096 characters"`
+	Text      string `json:"text" jsonschema:"reply text, up to 4096 characters after formatting"`
+	ParseMode string `json:"parse_mode,omitempty" jsonschema:"plain (default) or html"`
+	TopicID   int    `json:"topic_id,omitempty" jsonschema:"forum topic id, when replying inside a topic"`
 }
 
 func (s *Server) replyToMessage(ctx context.Context, _ *mcp.CallToolRequest, in replyIn) (*mcp.CallToolResult, sentOut, error) {
 	if in.MessageID <= 0 {
 		return nil, sentOut{}, errors.New("message_id is required")
 	}
-	return s.send(ctx, "reply_to_message", in.Chat, in.Text, in.MessageID)
+	return s.send(ctx, "reply_to_message", in.Chat, in.Text, in.ParseMode, in.MessageID, in.TopicID)
 }
 
-func (s *Server) send(ctx context.Context, tool, chat, text string, replyTo int) (*mcp.CallToolResult, sentOut, error) {
-	if err := checkText(text); err != nil {
+// format applies the parse mode and checks the resulting text. It runs
+// before any Telegram call, so bad HTML never reaches the network.
+func (s *Server) format(ctx context.Context, text, mode string) (tele.Formatted, error) {
+	var f tele.Formatted
+	switch mode {
+	case "", tele.ModePlain:
+		f = tele.Formatted{Text: text}
+	case tele.ModeHTML:
+		var err error
+		f, err = tele.ParseHTML(text, func(id int64) (tg.InputUserClass, error) {
+			return s.svc.MentionResolver(ctx)(id)
+		})
+		if err != nil {
+			return f, err
+		}
+	default:
+		return f, fmt.Errorf("parse_mode must be %q or %q", tele.ModePlain, tele.ModeHTML)
+	}
+	return f, checkText(f.Text)
+}
+
+func (s *Server) send(ctx context.Context, tool, chat, text, mode string, replyTo, topicID int) (*mcp.CallToolResult, sentOut, error) {
+	f, err := s.format(ctx, text, mode)
+	if err != nil {
 		return nil, sentOut{}, err
 	}
 	r, err := s.chat(ctx, chat)
 	if err != nil {
 		return nil, sentOut{}, err
 	}
-	id, err := s.svc.Send(ctx, r, text, replyTo)
+	id, err := s.svc.Send(ctx, r, f, replyTo, topicID)
 	e := audit.Entry{Tool: tool, ChatID: r.Marked, IDs: nonZero(id)}
 	if replyTo != 0 {
 		e.IDs = append([]int{replyTo}, e.IDs...)
@@ -348,7 +385,8 @@ func (s *Server) forwardMessage(ctx context.Context, _ *mcp.CallToolRequest, in 
 type editIn struct {
 	Chat      string `json:"chat" jsonschema:"chat id (as a string), @username, or me"`
 	MessageID int    `json:"message_id" jsonschema:"id of your message to edit"`
-	Text      string `json:"text" jsonschema:"new text, up to 4096 characters"`
+	Text      string `json:"text" jsonschema:"new text, up to 4096 characters after formatting"`
+	ParseMode string `json:"parse_mode,omitempty" jsonschema:"plain (default) or html"`
 }
 
 type okOut struct {
@@ -359,14 +397,15 @@ func (s *Server) editMessage(ctx context.Context, _ *mcp.CallToolRequest, in edi
 	if in.MessageID <= 0 {
 		return nil, okOut{}, errors.New("message_id is required")
 	}
-	if err := checkText(in.Text); err != nil {
+	f, err := s.format(ctx, in.Text, in.ParseMode)
+	if err != nil {
 		return nil, okOut{}, err
 	}
 	r, err := s.chat(ctx, in.Chat)
 	if err != nil {
 		return nil, okOut{}, err
 	}
-	err = s.svc.Edit(ctx, r, in.MessageID, in.Text)
+	err = s.svc.Edit(ctx, r, in.MessageID, f)
 	if err := s.record(audit.Entry{Tool: "edit_message", ChatID: r.Marked, IDs: []int{in.MessageID}}, err); err != nil {
 		return nil, okOut{}, err
 	}
@@ -426,4 +465,26 @@ func orEmpty[T any](s []T) []T {
 		return []T{}
 	}
 	return s
+}
+
+type listTopicsIn struct {
+	Chat  string `json:"chat" jsonschema:"supergroup id (as a string) or @username"`
+	Query string `json:"query,omitempty" jsonschema:"filter topics by title"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max topics, default 50, max 100"`
+}
+
+type topicsOut struct {
+	Topics []tele.Topic `json:"topics"`
+}
+
+func (s *Server) listTopics(ctx context.Context, _ *mcp.CallToolRequest, in listTopicsIn) (*mcp.CallToolResult, topicsOut, error) {
+	r, err := s.chat(ctx, in.Chat)
+	if err != nil {
+		return nil, topicsOut{}, err
+	}
+	topics, err := s.svc.Topics(ctx, r, in.Query, clamp(in.Limit, 50, 100))
+	if err != nil {
+		return nil, topicsOut{}, err
+	}
+	return nil, topicsOut{Topics: orEmpty(topics)}, nil
 }
