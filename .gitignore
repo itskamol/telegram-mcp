@@ -1,0 +1,7 @@
+/bin/
+/dist/
+*.db
+*.db-*
+*.db.lock
+config.toml
+.env
