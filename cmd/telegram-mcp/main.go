@@ -44,7 +44,7 @@ Usage:
   telegram-mcp logout [--account name]
   telegram-mcp version
 
-Settings live in config.toml in the profile directory (see "status").
+Settings live in ~/.config/telegram-mcp/config.toml (see "status").
 The session is stored encrypted in SQLite; its key is kept in the OS keychain.
 `
 
@@ -106,6 +106,13 @@ func setup(fs *flag.FlagSet, args []string, needAPI bool) (*env, error) {
 	if err != nil {
 		return nil, err
 	}
+	moved, err := config.Migrate(config.LegacyDir(), paths)
+	if err != nil {
+		return nil, fmt.Errorf("move profile to the XDG layout: %w", err)
+	}
+	for _, m := range moved {
+		fmt.Fprintf(os.Stderr, "moved to %s\n", m)
+	}
 	cfg, err := config.Load(paths)
 	if err != nil {
 		return nil, err
@@ -115,7 +122,7 @@ func setup(fs *flag.FlagSet, args []string, needAPI bool) (*env, error) {
 			return nil, err
 		}
 	}
-	if err := paths.EnsureDir(); err != nil {
+	if err := paths.EnsureDirs(); err != nil {
 		return nil, err
 	}
 	db, err := storage.Open(paths.DB)
@@ -235,7 +242,8 @@ func runStatus(ctx context.Context, args []string) error {
 	}
 	defer e.close()
 
-	fmt.Printf("profile:  %s\naccount:  %s\n", e.paths.Dir, e.account)
+	fmt.Printf("config:   %s\ndata:     %s\naudit:    %s\naccount:  %s\n",
+		e.paths.Config, e.paths.DB, e.paths.Audit, e.account)
 	ok, err := e.session.Exists(ctx)
 	if err != nil {
 		return err

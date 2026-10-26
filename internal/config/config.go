@@ -50,41 +50,6 @@ const (
 	DefaultMaxDownloadMB = 50
 )
 
-// Paths holds every file location the binary touches.
-type Paths struct {
-	Dir    string // ~/Library/Application Support/telegram-mcp on macOS
-	Config string // <Dir>/config.toml
-	DB     string // <Dir>/telegram-mcp.db
-	Audit  string // <Dir>/audit.log
-}
-
-// ResolvePaths picks the per-user config directory. TELEGRAM_MCP_HOME
-// overrides it, which tests and multi-profile setups rely on.
-func ResolvePaths() (Paths, error) {
-	dir := os.Getenv("TELEGRAM_MCP_HOME")
-	if dir == "" {
-		base, err := os.UserConfigDir()
-		if err != nil {
-			return Paths{}, fmt.Errorf("locate config dir: %w", err)
-		}
-		dir = filepath.Join(base, appName)
-	}
-	return Paths{
-		Dir:    dir,
-		Config: filepath.Join(dir, "config.toml"),
-		DB:     filepath.Join(dir, appName+".db"),
-		Audit:  filepath.Join(dir, "audit.log"),
-	}, nil
-}
-
-// EnsureDir creates the config directory readable only by the owner.
-func (p Paths) EnsureDir() error {
-	if err := os.MkdirAll(p.Dir, 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", p.Dir, err)
-	}
-	return os.Chmod(p.Dir, 0o700)
-}
-
 // Load reads config.toml if present and applies TELEGRAM_API_ID /
 // TELEGRAM_API_HASH overrides. A missing file is not an error.
 func Load(p Paths) (Config, error) {
