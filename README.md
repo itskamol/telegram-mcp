@@ -10,30 +10,28 @@ binary: no Python, no `uv`, no Docker. It is a focused Go rewrite inspired by
 
 ## Install
 
-macOS and Linux:
+Release binaries are built for **Apple Silicon Macs** (darwin/arm64) only.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/itskamol/telegram-mcp-go/main/install.sh | sh
 ```
 
-It downloads the latest release for your OS and CPU, verifies its SHA-256
+It downloads the latest release, verifies its SHA-256
 against `checksums.txt` and installs `telegram-mcp` into `~/.local/bin`
 (`BIN_DIR=/usr/local/bin` to change, `VERSION=v0.2.0` to pin).
 
-Homebrew (macOS, Linux):
+Homebrew:
 
 ```bash
 brew install itskamol/tap/telegram-mcp
 ```
-
-Windows: download the zip from [Releases](../../releases).
 
 The binaries are not signed or notarized by Apple. `install.sh` downloads
 with curl, which sets no quarantine flag, and the Homebrew cask clears it on
 install, so Gatekeeper does not block either. A binary downloaded by hand
 from Releases in a browser needs `xattr -d com.apple.quarantine telegram-mcp`.
 
-Or build from source (Go 1.26+):
+Intel Macs, Linux and Windows: build from source (Go 1.26+):
 
 ```bash
 go install github.com/itskamol/telegram-mcp-go/cmd/telegram-mcp@latest

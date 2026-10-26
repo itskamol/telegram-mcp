@@ -21,16 +21,14 @@ need curl
 need tar
 need uname
 
-case "$(uname -s)" in
-  Darwin) os=darwin ;;
-  Linux) os=linux ;;
-  *) die "unsupported OS $(uname -s); on Windows download the zip from https://github.com/$REPO/releases" ;;
-esac
-case "$(uname -m)" in
-  x86_64 | amd64) arch=amd64 ;;
-  arm64 | aarch64) arch=arm64 ;;
-  *) die "unsupported CPU $(uname -m)" ;;
-esac
+# Releases ship Apple Silicon binaries only; elsewhere, build from source.
+if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
+  die "release binaries are for Apple Silicon Macs only (this is $(uname -s)/$(uname -m)).
+Build from source with Go 1.26+:
+  go install github.com/$REPO/cmd/$BIN@latest"
+fi
+os=darwin
+arch=arm64
 
 if [ -z "${VERSION:-}" ]; then
   # /releases/latest redirects to /releases/tag/<tag>; no API token needed.

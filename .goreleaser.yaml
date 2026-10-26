@@ -7,19 +7,17 @@ builds:
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
     ldflags: ["-s -w -X main.version={{.Version}}"]
-    goos: [darwin, linux, windows]
-    goarch: [amd64, arm64]
+    # Releases target Apple Silicon only; other platforms build from source.
+    goos: [darwin]
+    goarch: [arm64]
 
 archives:
   - formats: [tar.gz]
-    format_overrides:
-      - goos: windows
-        formats: [zip]
 
 checksum:
   name_template: checksums.txt
 
-# brew install itskamol/tap/telegram-mcp
+# brew install itskamol/tap/telegram-mcp (Apple Silicon Macs)
 # Published to itskamol/homebrew-tap only when its token secret is set.
 homebrew_casks:
   - name: telegram-mcp
