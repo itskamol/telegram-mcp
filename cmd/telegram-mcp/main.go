@@ -1,5 +1,6 @@
 // Command telegram-mcp is a single-binary Telegram MCP server.
 //
+//	telegram-mcp serve [--read-only] [--account name]
 //	telegram-mcp login [--qr] [--phone +998...] [--account name]
 //	telegram-mcp status [--account name]
 //	telegram-mcp logout [--account name]
@@ -14,15 +15,21 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/gotd/contrib/middleware/floodwait"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/gotd/td/tg"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/itskamol/telegram-mcp-go/internal/audit"
 	"github.com/itskamol/telegram-mcp-go/internal/config"
 	"github.com/itskamol/telegram-mcp-go/internal/login"
+	"github.com/itskamol/telegram-mcp-go/internal/mcpserver"
 	"github.com/itskamol/telegram-mcp-go/internal/secret"
 	"github.com/itskamol/telegram-mcp-go/internal/storage"
+	"github.com/itskamol/telegram-mcp-go/internal/tele"
 )
 
 // version is set by the release build: -ldflags "-X main.version=v1.2.3".
@@ -31,6 +38,7 @@ var version = "dev"
 const usage = `telegram-mcp: Telegram MCP server in one binary
 
 Usage:
+  telegram-mcp serve  [--read-only] [--account name]   run the MCP server on stdio
   telegram-mcp login  [--qr] [--phone +998...] [--account name]
   telegram-mcp status [--account name]
   telegram-mcp logout [--account name]
@@ -50,6 +58,8 @@ func main() {
 
 	var err error
 	switch cmd, args := os.Args[1], os.Args[2:]; cmd {
+	case "serve":
+		err = runServe(ctx, args)
 	case "login":
 		err = runLogin(ctx, args)
 	case "status":
@@ -121,14 +131,65 @@ func setup(fs *flag.FlagSet, args []string, needAPI bool) (*env, error) {
 	}, nil
 }
 
-func (e *env) client(handler telegram.UpdateHandler) *telegram.Client {
+func (e *env) client(handler telegram.UpdateHandler, mw ...telegram.Middleware) *telegram.Client {
 	return telegram.NewClient(e.cfg.APIID, e.cfg.APIHash, telegram.Options{
 		SessionStorage: e.session,
 		UpdateHandler:  handler,
+		NoUpdates:      handler == nil,
+		Middlewares:    mw,
 		Device: telegram.DeviceConfig{
 			DeviceModel: "telegram-mcp",
 			AppVersion:  version,
 		},
+	})
+}
+
+func runServe(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	readOnly := fs.Bool("read-only", false, "register only the read tools (overrides config)")
+	e, err := setup(fs, args, true)
+	if err != nil {
+		return err
+	}
+	defer e.close()
+
+	ok, err := e.session.Exists(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("not logged in: run `telegram-mcp login` first")
+	}
+
+	auditLog, err := audit.Open(e.paths.Audit, e.account)
+	if err != nil {
+		return err
+	}
+	defer auditLog.Close()
+
+	// Flood waits up to a minute are slept through transparently; longer
+	// ones fail the tool call instead of hanging past its timeout.
+	waiter := floodwait.NewWaiter().WithMaxWait(time.Minute).WithMaxRetries(3)
+	c := e.client(nil, waiter)
+
+	return waiter.Run(ctx, func(ctx context.Context) error {
+		return c.Run(ctx, func(ctx context.Context) error {
+			self, err := c.Self(ctx)
+			if err != nil {
+				return fmt.Errorf("session is not authorized (run `telegram-mcp login`): %w", err)
+			}
+			svc, err := tele.NewService(ctx, c.API(), storage.NewPeers(e.db, e.account), self)
+			if err != nil {
+				return err
+			}
+			srv := mcpserver.New(svc, mcpserver.Policy{
+				ReadOnly:       *readOnly || e.cfg.ReadOnly,
+				AllowedChatIDs: e.cfg.AllowedChatIDs,
+				MaxDelete:      e.cfg.MaxDelete,
+			}, auditLog, version)
+			fmt.Fprintf(os.Stderr, "telegram-mcp %s serving %s on stdio\n", version, describe(self))
+			return srv.Run(ctx, &mcp.StdioTransport{})
+		})
 	})
 }
 

@@ -5,8 +5,8 @@ binary: no Python, no `uv`, no Docker. It is a focused Go rewrite inspired by
 [chigwell/telegram-mcp](https://github.com/chigwell/telegram-mcp), built on
 [gotd/td](https://github.com/gotd/td).
 
-> **Status: early.** Login and secure session storage work. The MCP server and
-> its tools are next (see [Roadmap](#roadmap)).
+> **Status: early.** Login, secure session storage and 12 core tools work.
+> Media tools are next (see [Roadmap](#roadmap)).
 
 ## Install
 
@@ -42,6 +42,60 @@ go install github.com/itskamol/telegram-mcp-go/cmd/telegram-mcp@latest
 session on Telegram's side and deletes it locally. `--account work` keeps
 several accounts side by side.
 
+## Use with Claude
+
+Add to `claude_desktop_config.json` (no secrets go here):
+
+```json
+{
+  "mcpServers": {
+    "telegram": {
+      "command": "/usr/local/bin/telegram-mcp",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+Or for Claude Code:
+
+```bash
+claude mcp add telegram -- telegram-mcp serve
+```
+
+## Tools
+
+| Read | Write |
+|---|---|
+| `get_me` | `send_message` |
+| `list_chats` | `reply_to_message` |
+| `resolve_username` | `forward_message` |
+| `search_contacts` | `edit_message` (destructive) |
+| `list_messages` | `delete_message` (destructive) |
+| `search_messages` | `mark_as_read` |
+
+Chats are addressed by the `id` from `list_chats` (Bot API style: users
+positive, groups negative, channels `-100…`), by `@username`, or `me`.
+
+## Safety settings
+
+All optional, in `config.toml`:
+
+```toml
+read_only = true                         # register only the read tools (also: serve --read-only)
+allowed_chat_ids = [123456789, -1001234567890]  # restrict every tool to these chats
+max_delete = 20                          # message IDs per delete_message call
+```
+
+- Text from Telegram is returned as JSON with invisible and control characters
+  stripped, and tool descriptions tell the model not to follow instructions in it.
+- Outside channels Telegram deletes by message ID alone, with no chat attached.
+  `delete_message` first checks that every ID belongs to the chat you named
+  and refuses otherwise.
+- Every write is appended to `audit.log` in the profile directory (tool, chat,
+  message IDs, error) without message text.
+- Flood waits up to a minute are absorbed; each tool call times out after 55 s.
+
 ## How the session is stored
 
 | What | Where |
@@ -63,12 +117,11 @@ several accounts side by side.
 
 - [x] Login (phone, QR, 2FA), status, logout
 - [x] Encrypted SQLite session, keychain key, single-process lock
-- [ ] MCP server over stdio with flood-wait handling and per-tool timeouts
-- [ ] Tools: `list_chats`, `resolve_username`, `search_contacts`, `list_messages`,
-      `search_messages`, `get_me`, `send_message`, `reply_to_message`,
-      `forward_message`, `edit_message`, `delete_message`, `mark_as_read`
+- [x] MCP server over stdio with flood-wait handling and per-tool timeouts
+- [x] 12 core tools (see [Tools](#tools))
+- [x] Safety: output sanitizing, chat allowlist, read-only mode, audit log
 - [ ] Media: `get_media_info`, `download_media` (allowed roots, size limit), `open_photo`
-- [ ] Safety: output sanitizing, chat allowlist, `--read-only`, audit log
+- [ ] Markdown/HTML formatting for sent messages, forum topics
 - [ ] `install-claude` helper, Homebrew tap, signed macOS builds
 
 ## License

@@ -27,13 +27,25 @@ var accountRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 type Config struct {
 	APIID   int    `toml:"api_id"`
 	APIHash string `toml:"api_hash"`
+
+	// ReadOnly leaves the write tools unregistered.
+	ReadOnly bool `toml:"read_only"`
+	// AllowedChatIDs, when set, limits every chat-scoped tool to these
+	// marked IDs (user > 0, group < 0, channel -100...).
+	AllowedChatIDs []int64 `toml:"allowed_chat_ids"`
+	// MaxDelete caps message IDs per delete_message call. Default 20.
+	MaxDelete int `toml:"max_delete"`
 }
+
+// DefaultMaxDelete is used when max_delete is unset.
+const DefaultMaxDelete = 20
 
 // Paths holds every file location the binary touches.
 type Paths struct {
 	Dir    string // ~/Library/Application Support/telegram-mcp on macOS
 	Config string // <Dir>/config.toml
 	DB     string // <Dir>/telegram-mcp.db
+	Audit  string // <Dir>/audit.log
 }
 
 // ResolvePaths picks the per-user config directory. TELEGRAM_MCP_HOME
@@ -51,6 +63,7 @@ func ResolvePaths() (Paths, error) {
 		Dir:    dir,
 		Config: filepath.Join(dir, "config.toml"),
 		DB:     filepath.Join(dir, appName+".db"),
+		Audit:  filepath.Join(dir, "audit.log"),
 	}, nil
 }
 
@@ -78,6 +91,9 @@ func Load(p Paths) (Config, error) {
 	}
 	if v := os.Getenv("TELEGRAM_API_HASH"); v != "" {
 		c.APIHash = v
+	}
+	if c.MaxDelete <= 0 {
+		c.MaxDelete = DefaultMaxDelete
 	}
 	return c, nil
 }
