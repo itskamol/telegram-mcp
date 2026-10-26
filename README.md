@@ -20,7 +20,18 @@ It downloads the latest release for your OS and CPU, verifies its SHA-256
 against `checksums.txt` and installs `telegram-mcp` into `~/.local/bin`
 (`BIN_DIR=/usr/local/bin` to change, `VERSION=v0.2.0` to pin).
 
+Homebrew (macOS, Linux):
+
+```bash
+brew install itskamol/tap/telegram-mcp
+```
+
 Windows: download the zip from [Releases](../../releases).
+
+The binaries are not signed or notarized by Apple. `install.sh` downloads
+with curl, which sets no quarantine flag, and the Homebrew cask clears it on
+install, so Gatekeeper does not block either. A binary downloaded by hand
+from Releases in a browser needs `xattr -d com.apple.quarantine telegram-mcp`.
 
 Or build from source (Go 1.26+):
 
@@ -179,7 +190,7 @@ destination file already exists or a server is still running from the old place.
 - [x] Media: `get_media_info`, `download_media` (allowed roots, size limit), `open_photo`
 - [x] HTML formatting for sent messages, forum topics
 - [x] One-line installer, `install claude-desktop|claude-code`
-- [ ] Homebrew tap, signed and notarized macOS builds
+- [x] Homebrew tap (`brew install itskamol/tap/telegram-mcp`)
 
 ## License
 

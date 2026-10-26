@@ -1,7 +1,8 @@
 version: 2
 
 builds:
-  - main: ./cmd/telegram-mcp
+  - id: telegram-mcp
+    main: ./cmd/telegram-mcp
     binary: telegram-mcp
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
@@ -17,6 +18,31 @@ archives:
 
 checksum:
   name_template: checksums.txt
+
+# brew install itskamol/tap/telegram-mcp
+# Published to itskamol/homebrew-tap only when its token secret is set.
+homebrew_casks:
+  - name: telegram-mcp
+    binaries: [telegram-mcp]
+    homepage: https://github.com/itskamol/telegram-mcp-go
+    description: Telegram MCP server in a single binary
+    directory: Casks
+    skip_upload: '{{ if index .Env "HOMEBREW_TAP_GITHUB_TOKEN" }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    repository:
+      owner: itskamol
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    hooks:
+      post:
+        # The binary is not signed or notarized, so Gatekeeper would block a
+        # quarantined download; Homebrew users already trust the tap.
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/telegram-mcp"]
+          end
 
 changelog:
   sort: asc
