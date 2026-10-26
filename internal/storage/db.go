@@ -15,8 +15,9 @@ import (
 // ErrLocked means another telegram-mcp process holds the database.
 //
 // Two processes on one auth key make Telegram return AUTH_KEY_DUPLICATED and
-// drop both connections, so a second instance must refuse to start.
-var ErrLocked = errors.New("another telegram-mcp process is using this profile")
+// drop both connections, so a second process must not connect: `serve`
+// relays through the first one (package hub), other commands refuse.
+var ErrLocked = errors.New("a telegram-mcp server is already running for this profile (for example inside Claude Desktop); quit it first")
 
 const schema = `
 CREATE TABLE IF NOT EXISTS sessions (

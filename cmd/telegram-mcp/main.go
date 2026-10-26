@@ -13,10 +13,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -28,6 +30,7 @@ import (
 
 	"github.com/itskamol/telegram-mcp-go/internal/audit"
 	"github.com/itskamol/telegram-mcp-go/internal/config"
+	"github.com/itskamol/telegram-mcp-go/internal/hub"
 	"github.com/itskamol/telegram-mcp-go/internal/install"
 	"github.com/itskamol/telegram-mcp-go/internal/login"
 	"github.com/itskamol/telegram-mcp-go/internal/mcpserver"
@@ -96,10 +99,16 @@ type env struct {
 	account string
 }
 
-func (e *env) close() { _ = e.db.Close() }
+func (e *env) close() {
+	if e.db != nil {
+		_ = e.db.Close()
+	}
+}
 
 // setup parses the shared --account flag, loads config and opens storage.
 // needAPI is false for commands that can run without API credentials.
+// When another process holds the profile it returns storage.ErrLocked
+// together with an env that has paths, config and account but no database.
 func setup(fs *flag.FlagSet, args []string, needAPI bool) (*env, error) {
 	account := fs.String("account", config.DefaultAccount, "account label, for several Telegram accounts")
 	if err := fs.Parse(args); err != nil {
@@ -133,6 +142,9 @@ func setup(fs *flag.FlagSet, args []string, needAPI bool) (*env, error) {
 		return nil, err
 	}
 	db, err := storage.Open(paths.DB)
+	if errors.Is(err, storage.ErrLocked) {
+		return &env{paths: paths, cfg: cfg, account: *account}, err
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -162,6 +174,11 @@ func runServe(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	readOnly := fs.Bool("read-only", false, "register only the read tools (overrides config)")
 	e, err := setup(fs, args, true)
+	if errors.Is(err, storage.ErrLocked) {
+		// Another serve owns the Telegram connection: share it.
+		ro := *readOnly || e.cfg.ReadOnly
+		return hub.Relay(ctx, hub.SocketPath(e.paths.DataDir, e.account, ro), os.Stdin, os.Stdout, 30*time.Second)
+	}
 	if err != nil {
 		return err
 	}
@@ -196,16 +213,41 @@ func runServe(ctx context.Context, args []string) error {
 			if err != nil {
 				return err
 			}
-			srv := mcpserver.New(svc, mcpserver.Policy{
-				ReadOnly:       *readOnly || e.cfg.ReadOnly,
+			policy := mcpserver.Policy{
+				ReadOnly:       e.cfg.ReadOnly,
 				AllowedChatIDs: e.cfg.AllowedChatIDs,
 				MaxDelete:      e.cfg.MaxDelete,
 				AllowedRoots:   e.cfg.AllowedRoots,
 				MaxDownload:    int64(e.cfg.MaxDownloadMB) << 20,
 				MaxUpload:      int64(e.cfg.MaxUploadMB) << 20,
-			}, auditLog, version)
+			}
+			full := mcpserver.New(svc, policy, auditLog, version)
+			policy.ReadOnly = true
+			readOnlySrv := mcpserver.New(svc, policy, auditLog, version)
+
+			// Serve other processes of this profile on two sockets, one per
+			// mode, so a --read-only relay can only reach read tools.
+			ctx, cancel := context.WithCancel(ctx)
+			var wg sync.WaitGroup
+			defer func() {
+				cancel()  // stops the listeners and relayed sessions...
+				wg.Wait() // ...and waits for them, in this order
+			}()
+			log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+			for ro, srv := range map[bool]*mcp.Server{false: full, true: readOnlySrv} {
+				ln, err := hub.Listen(hub.SocketPath(e.paths.DataDir, e.account, ro))
+				if err != nil {
+					return fmt.Errorf("listen for other processes: %w", err)
+				}
+				wg.Go(func() { hub.Serve(ctx, ln, srv, log) })
+			}
+
+			own := full
+			if *readOnly {
+				own = readOnlySrv
+			}
 			fmt.Fprintf(os.Stderr, "telegram-mcp %s serving %s on stdio\n", version, describe(self))
-			return srv.Run(ctx, &mcp.StdioTransport{})
+			return own.Run(ctx, &mcp.StdioTransport{})
 		})
 	})
 }
@@ -245,13 +287,19 @@ func runLogin(ctx context.Context, args []string) error {
 
 func runStatus(ctx context.Context, args []string) error {
 	e, err := setup(flag.NewFlagSet("status", flag.ContinueOnError), args, false)
-	if err != nil {
+	locked := errors.Is(err, storage.ErrLocked)
+	if err != nil && !locked {
 		return err
 	}
 	defer e.close()
 
 	fmt.Printf("config:   %s\ndata:     %s\naudit:    %s\naccount:  %s\n",
 		e.paths.Config, e.paths.DB, e.paths.Audit, e.account)
+	if locked {
+		// Connecting now would open a second connection on the same auth key.
+		fmt.Println("session:  in use by a running telegram-mcp server (e.g. in Claude Desktop); not checked")
+		return nil
+	}
 	ok, err := e.session.Exists(ctx)
 	if err != nil {
 		return err
