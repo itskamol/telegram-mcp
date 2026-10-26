@@ -74,6 +74,10 @@ func (s *Service) Dialogs(ctx context.Context, limit int) ([]Chat, error) {
 		}
 		out = append(out, c)
 	}
+	// Pinned dialogs come on top of the limit, so trim to what was asked.
+	if len(out) > limit {
+		out = out[:limit]
+	}
 	return out, nil
 }
 
