@@ -52,7 +52,7 @@ func TestMediaKind(t *testing.T) {
 	if got := mediaKind(voice); got != "voice" {
 		t.Fatalf("voice: %q", got)
 	}
-	if got := mediaKind(&tg.MessageMediaPhoto{}); got != "Photo" {
+	if got := mediaKind(&tg.MessageMediaPhoto{}); got != "photo" {
 		t.Fatalf("photo: %q", got)
 	}
 	if got := mediaKind(nil); got != "" {

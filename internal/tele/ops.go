@@ -332,7 +332,8 @@ func mediaKind(m tg.MessageMediaClass) string {
 		}
 		return "document"
 	default:
-		return strings.TrimPrefix(m.TypeName(), "messageMedia")
+		// messageMediaGeoLive -> "geolive", matching the lowercase kinds above.
+		return strings.ToLower(strings.TrimPrefix(m.TypeName(), "messageMedia"))
 	}
 }
 
