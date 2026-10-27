@@ -522,25 +522,39 @@ func mediaKind(m tg.MessageMediaClass) string {
 		// downloadable, and the name says so up front.
 		return "link_preview"
 	case *tg.MessageMediaDocument:
-		if d, ok := m.Document.(*tg.Document); ok {
-			for _, a := range d.Attributes {
-				switch a := a.(type) {
-				case *tg.DocumentAttributeAudio:
-					if a.Voice {
-						return "voice"
-					}
-					return "audio"
-				case *tg.DocumentAttributeVideo:
-					if a.RoundMessage {
-						return "video_note"
-					}
-					return "video"
-				case *tg.DocumentAttributeSticker:
-					return "sticker"
-				case *tg.DocumentAttributeAnimated:
-					return "gif"
-				}
+		d, ok := m.Document.(*tg.Document)
+		if !ok {
+			return "document"
+		}
+		// Attributes come in no fixed order, and video stickers and GIFs
+		// carry a video attribute too: collect them all, then decide, most
+		// specific kind first.
+		var sticker, gif, round, video, voice, audio bool
+		for _, a := range d.Attributes {
+			switch a := a.(type) {
+			case *tg.DocumentAttributeSticker:
+				sticker = true
+			case *tg.DocumentAttributeAnimated:
+				gif = true
+			case *tg.DocumentAttributeVideo:
+				video, round = true, round || a.RoundMessage
+			case *tg.DocumentAttributeAudio:
+				audio, voice = true, voice || a.Voice
 			}
+		}
+		switch {
+		case sticker:
+			return "sticker"
+		case gif:
+			return "gif"
+		case round:
+			return "video_note"
+		case video:
+			return "video"
+		case voice:
+			return "voice"
+		case audio:
+			return "audio"
 		}
 		return "document"
 	default:

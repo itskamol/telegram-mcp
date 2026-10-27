@@ -66,6 +66,34 @@ func TestMediaKind(t *testing.T) {
 	}
 }
 
+// Telegram lists a document's attributes in no fixed order, and several
+// kinds carry a video attribute: the kind must not depend on which comes
+// first (seen live: a video sticker came back as "video").
+func TestMediaKindPrefersStickerAndGIF(t *testing.T) {
+	doc := func(attrs ...tg.DocumentAttributeClass) tg.MessageMediaClass {
+		return &tg.MessageMediaDocument{Document: &tg.Document{Attributes: attrs}}
+	}
+	name := &tg.DocumentAttributeFilename{FileName: "x"}
+	cases := map[string]struct {
+		media tg.MessageMediaClass
+		want  string
+	}{
+		"video sticker":    {doc(&tg.DocumentAttributeVideo{W: 512, H: 512}, name, &tg.DocumentAttributeSticker{Alt: "🤝"}), "sticker"},
+		"animated sticker": {doc(&tg.DocumentAttributeImageSize{W: 512, H: 512}, &tg.DocumentAttributeSticker{Alt: "😂"}, name), "sticker"},
+		"gif":              {doc(&tg.DocumentAttributeVideo{W: 422, H: 280}, &tg.DocumentAttributeAnimated{}, name), "gif"},
+		"round video":      {doc(&tg.DocumentAttributeVideo{RoundMessage: true}), "video_note"},
+		"video":            {doc(&tg.DocumentAttributeVideo{}, name), "video"},
+		"voice":            {doc(&tg.DocumentAttributeAudio{Voice: true}), "voice"},
+		"music":            {doc(name, &tg.DocumentAttributeAudio{}), "audio"},
+		"file":             {doc(name), "document"},
+	}
+	for n, c := range cases {
+		if got := mediaKind(c.media); got != c.want {
+			t.Errorf("%s: %q, want %q", n, got, c.want)
+		}
+	}
+}
+
 func TestPickPhotoSize(t *testing.T) {
 	sizes := []tg.PhotoSizeClass{
 		&tg.PhotoStrippedSize{Type: "i"},
