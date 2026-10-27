@@ -212,3 +212,18 @@ func TestOwnDeletesLeaveTheBuffer(t *testing.T) {
 		t.Error("no feed should be a no-op")
 	}
 }
+
+func TestFeedChatIDsIsTypedArray(t *testing.T) {
+	b, _ := json.Marshal(inputSchema[newMessagesIn]())
+	var s struct {
+		Properties map[string]struct {
+			Type  any
+			Items struct{ Type any }
+		}
+	}
+	_ = json.Unmarshal(b, &s)
+	p := s.Properties["chat_ids"]
+	if p.Type != "array" || fmt.Sprint(p.Items.Type) != "[integer string]" {
+		t.Fatalf("chat_ids schema: %s", b)
+	}
+}

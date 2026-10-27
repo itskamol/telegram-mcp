@@ -102,7 +102,7 @@ claude mcp add telegram -- telegram-mcp serve
 | `list_topics` | `download_media` (local disk only) |
 | `get_media_info` | |
 | `view_photo` | |
-| `get_new_messages` (with `watch_chat_ids`) | |
+| `get_new_messages` (with `watch_chat_ids` or `watch_all`) | |
 
 Conventions the tools share, so a model can carry what it learned from one
 tool to the next:
@@ -143,12 +143,24 @@ watch_topics = { "-1001889276137" = [1] }   # optional: only General
 feed_retention_days = 7
 ```
 
+`watch_all = true` buffers every chat of the account instead. It is off by
+default because it writes every incoming message to disk. Telegram's
+service chat `777000`, which sends login codes, is never buffered, and
+`allowed_chat_ids` still limits it. `watch_topics` filters of listed chats
+apply with it too.
+
 - **Consumers**: the server keeps each consumer's position (`consumer`,
   default `"default"`), so a new chat session continues where the last one
   stopped. Pass the previous answer's `cursor` as `ack_cursor` once those
   messages are handled; without it the same batch comes again, so a session
   that dies mid-batch loses nothing (at-least-once). `wait_seconds` (up to 45)
   waits for the next message instead of answering empty.
+- **Choosing chats**: `chat_ids` narrows a consumer to some of the watched
+  chats, e.g. `get_new_messages(consumer="pos", chat_ids=[-1001889276137])`.
+  The server remembers it for that consumer, so later calls and
+  `telegram-mcp watch --consumer pos` need not repeat it; `chat_ids=[]`
+  goes back to all watched chats. It can only narrow: an agent cannot add a
+  chat that `config.toml` does not watch.
 - **Edits** replace the buffered message and deliver it again; **deletes**
   remove it. `gap: true` means unhandled messages expired by retention.
 - **Topic filters fail closed**: a message whose forum topic cannot be told
@@ -175,6 +187,8 @@ telegram-mcp watch --consumer default
 {"chat_id":-1004325193310,"first_id":1142,"last_id":1143,"count":2}
 ```
 
+- Only chats in the consumer's `chat_ids` are announced (all watched chats
+  if it has none).
 - One line per chat with new or edited messages: ids only, never message
   text, so nothing private ends up in notifications or logs. The agent then
   calls `get_new_messages(consumer, ack_cursor)` to read and acknowledge.
@@ -219,6 +233,9 @@ max_upload_mb = 50                       # per send_file file
   opened is the one it validated.
 - `view_photo` shows the model a copy scaled to at most 1280 px (5 MB cap).
 - Flood waits up to a minute are absorbed; each tool call times out after 55 s.
+- Only the user decides what is buffered (`watch_chat_ids`, `watch_all`);
+  `get_new_messages chat_ids` can narrow that, never widen it. Login codes
+  from Telegram's `777000` are never buffered, even with `watch_all`.
 
 ## Where files live
 

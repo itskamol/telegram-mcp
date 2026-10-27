@@ -52,6 +52,10 @@ type Config struct {
 	// WatchTopics limits a forum chat to some topics, keyed by chat id:
 	// { "-1001889276137" = [1] } keeps only General.
 	WatchTopics map[string][]int `toml:"watch_topics"`
+	// WatchAll buffers every chat (Telegram's 777000 service account with
+	// login codes is never buffered). Off by default: the user, not an
+	// agent, decides what reaches the disk. allowed_chat_ids still limits it.
+	WatchAll bool `toml:"watch_all"`
 	// FeedRetentionDays drops buffered messages older than this. Default 7.
 	FeedRetentionDays int `toml:"feed_retention_days"`
 }

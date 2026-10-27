@@ -368,3 +368,41 @@ func TestBlockedOutputDoesNotStarveCheckpoint(t *testing.T) {
 		t.Fatalf("checkpoint busy=%d: the stuck watcher holds a read transaction", busy)
 	}
 }
+
+func TestWatchAnnouncesOnlyConsumerChats(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "w.db")
+	db, s := writer(t, path)
+	defer db.Close()
+	if err := s.SetChats(context.Background(), "pos", []int64{watched}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := startWatch(t, path, "pos", time.Hour)
+	time.Sleep(100 * time.Millisecond)
+	add(t, s, -1001234, 1, 0)
+	add(t, s, watched, 2, 0)
+	r.out.waitFor(t, 1)
+	time.Sleep(100 * time.Millisecond)
+	got := r.out.notices(t)
+	if len(got) != 1 || got[0].ChatID != watched || got[0].Count != 1 {
+		t.Fatalf("notices %+v, want only chat %d", got, watched)
+	}
+}
+
+func TestWatchReadsConsumersWithoutChatIDs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, s := writer(t, path)
+	defer db.Close()
+	// A server of an older version: no chat_ids column.
+	if _, err := db.SQL.Exec(`ALTER TABLE feed_consumers DROP COLUMN chat_ids`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO feed_consumers (account, name, committed, delivered) VALUES ('default', 'old', 0, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	add(t, s, watched, 5, 0) // unacknowledged backlog
+	r := startWatch(t, path, "old", time.Hour)
+	if got := r.out.waitFor(t, 1); got[0].FirstID != 5 {
+		t.Fatalf("notices %+v", got)
+	}
+}

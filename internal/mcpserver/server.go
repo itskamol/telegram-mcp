@@ -107,7 +107,8 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, 
 
 	if fd != nil {
 		add(srv, "get_new_messages", "Get New Messages", readTelegram,
-			"Return new and edited messages of the watched chats (watch_chat_ids in config.toml), oldest first. "+
+			"Return new and edited messages of the watched chats (watch_chat_ids or watch_all in config.toml), oldest first. "+
+				"chat_ids narrows this consumer to some of them and is remembered. "+
 				"The server keeps each consumer's position across sessions. Pass the previous answer's cursor as "+
 				"ack_cursor once you have handled those messages; without it the same messages come again, so "+
 				"nothing is lost if a session ends mid-batch. wait_seconds waits for new messages. "+

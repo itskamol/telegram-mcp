@@ -37,7 +37,7 @@ func newFixture(t *testing.T, watch Watch) fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := NewHandler(store, NewNotifier(), watch, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h := NewHandler(store, NewNotifier(), Scope{Chats: watch}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h.Service = &tele.Service{Peers: storage.NewPeers(db, "default"), SelfID: 1}
 	h.Backoff = time.Millisecond
 	return fixture{db, store, h}
@@ -195,5 +195,46 @@ func TestDeletes(t *testing.T) {
 	}
 	if got := stored(t, f); got[1] || !got[2] {
 		t.Fatalf("after deletes: %v", got)
+	}
+}
+
+func TestScope(t *testing.T) {
+	const other = -1001234
+	cases := []struct {
+		name  string
+		scope Scope
+		chat  int64
+		want  bool
+	}{
+		{"listed", Scope{Chats: Watch{group: nil}}, group, true},
+		{"not listed", Scope{Chats: Watch{group: nil}}, other, false},
+		{"watch_all", Scope{All: true}, other, true},
+		{"watch_all never has login codes", Scope{All: true}, ServiceChat, false},
+		{"listed service chat stays out", Scope{Chats: Watch{ServiceChat: nil}}, ServiceChat, false},
+		{"watch_all inside the allowlist", Scope{All: true, Allowed: []int64{group}}, group, true},
+		{"watch_all outside the allowlist", Scope{All: true, Allowed: []int64{group}}, other, false},
+	}
+	for _, c := range cases {
+		if got := c.scope.Has(c.chat); got != c.want {
+			t.Errorf("%s: Has(%d) = %v, want %v", c.name, c.chat, got, c.want)
+		}
+	}
+	if (Scope{}).Enabled() || !(Scope{All: true}).Enabled() {
+		t.Error("Enabled")
+	}
+}
+
+func TestWatchAllKeepsListedTopicFilter(t *testing.T) {
+	f := newFixture(t, Watch{group: {1}})
+	f.h.Scope.All = true
+	ctx := context.Background()
+	f.h.message(ctx, tg.Entities{}, channelMsg(1, nil, "General"))
+	f.h.message(ctx, tg.Entities{}, channelMsg(3, &tg.MessageReplyHeader{ForumTopic: true, ReplyToMsgID: noteTopic}, "secret in Note"))
+	f.h.message(ctx, tg.Entities{}, &tg.Message{ID: 6, PeerID: &tg.PeerChannel{ChannelID: 42}, Message: "any chat", Date: 1})
+	f.h.message(ctx, tg.Entities{}, &tg.Message{ID: 7, PeerID: &tg.PeerUser{UserID: ServiceChat}, Message: "login code", Date: 1})
+
+	got := stored(t, f)
+	if !got[1] || !got[6] || got[3] || got[7] || len(got) != 2 {
+		t.Fatalf("buffered %v, want General message 1 and the other chat's 6", got)
 	}
 }

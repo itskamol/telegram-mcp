@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS feed_consumers (
 	name      TEXT    NOT NULL,
 	committed INTEGER NOT NULL DEFAULT 0,
 	delivered INTEGER NOT NULL DEFAULT 0,
+	chat_ids  TEXT    NOT NULL DEFAULT '',
 	PRIMARY KEY (account, name)
 );
 CREATE TABLE IF NOT EXISTS feed_dead_letters (
@@ -81,12 +82,48 @@ type Store struct {
 // ErrAckAhead means an ack_cursor larger than anything delivered.
 var ErrAckAhead = errors.New("ack_cursor was never delivered to this consumer; pass the cursor of the previous answer")
 
-// NewStore creates the tables if needed.
+// NewStore creates the tables if needed and adds columns that older
+// versions did not have.
 func NewStore(ctx context.Context, db *storage.DB, account string) (*Store, error) {
 	if _, err := db.SQL.ExecContext(ctx, schema); err != nil {
 		return nil, fmt.Errorf("feed schema: %w", err)
 	}
+	var has bool
+	if err := db.SQL.QueryRowContext(ctx,
+		`SELECT COUNT(*) > 0 FROM pragma_table_info('feed_consumers') WHERE name = 'chat_ids'`).Scan(&has); err != nil {
+		return nil, fmt.Errorf("feed schema: %w", err)
+	}
+	if !has {
+		if _, err := db.SQL.ExecContext(ctx,
+			`ALTER TABLE feed_consumers ADD COLUMN chat_ids TEXT NOT NULL DEFAULT ''`); err != nil {
+			return nil, fmt.Errorf("feed schema: %w", err)
+		}
+	}
 	return &Store{db: db, account: account}, nil
+}
+
+// inChats is the SQL condition for a consumer's chat filter, stored as a
+// JSON array of chat ids; empty means every buffered chat. It takes the
+// filter twice.
+const inChats = `(? = '' OR chat_id IN (SELECT value FROM json_each(?)))`
+
+// SetChats replaces the chats a consumer reads; none means all buffered
+// chats. It applies from the consumer's current offset: messages it has
+// not acknowledged yet in a newly added chat are delivered too.
+func (s *Store) SetChats(ctx context.Context, consumer string, chats []int64) error {
+	filter := ""
+	if len(chats) > 0 {
+		b, err := json.Marshal(chats)
+		if err != nil {
+			return err
+		}
+		filter = string(b)
+	}
+	_, err := s.db.SQL.ExecContext(ctx, `
+		INSERT INTO feed_consumers (account, name, chat_ids) VALUES (?, ?, ?)
+		ON CONFLICT (account, name) DO UPDATE SET chat_ids = excluded.chat_ids`,
+		s.account, consumer, filter)
+	return err
 }
 
 // Upsert stores a new message or a newer edit of one and reports whether
@@ -182,8 +219,9 @@ func (s *Store) Fetch(ctx context.Context, consumer string, ack int64, limit int
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
 	var committed, delivered, pruned int64
-	err = tx.QueryRowContext(ctx, `SELECT committed, delivered FROM feed_consumers WHERE account = ? AND name = ?`,
-		s.account, consumer).Scan(&committed, &delivered)
+	var filter string
+	err = tx.QueryRowContext(ctx, `SELECT committed, delivered, chat_ids FROM feed_consumers WHERE account = ? AND name = ?`,
+		s.account, consumer).Scan(&committed, &delivered, &filter)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Batch{}, err
 	}
@@ -197,8 +235,8 @@ func (s *Store) Fetch(ctx context.Context, consumer string, ack int64, limit int
 	}
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT seq, body FROM feed_messages WHERE account = ? AND seq > ? ORDER BY seq LIMIT ?`,
-		s.account, committed, limit+1)
+		SELECT seq, body FROM feed_messages WHERE account = ? AND seq > ? AND `+inChats+` ORDER BY seq LIMIT ?`,
+		s.account, committed, filter, filter, limit+1)
 	if err != nil {
 		return Batch{}, err
 	}

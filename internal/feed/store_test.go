@@ -175,3 +175,68 @@ func TestPruneReportsGap(t *testing.T) {
 		t.Error("gap reported after catching up")
 	}
 }
+
+func TestConsumerChats(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	const other = -1001234
+	put(t, s, storage.KindChannel, msg(group, 1, 0, "a"))
+	put(t, s, storage.KindChannel, msg(other, 2, 0, "b"))
+	put(t, s, storage.KindChannel, msg(group, 3, 0, "c"))
+
+	if err := s.SetChats(ctx, "pos", []int64{group}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.Fetch(ctx, "pos", 0, 10)
+	if err != nil || len(b.Items) != 2 || b.Items[0].ID != 1 || b.Items[1].ID != 3 {
+		t.Fatalf("filtered batch: %+v %v", b, err)
+	}
+	// The filter is remembered and keeps the offset.
+	b, _ = s.Fetch(ctx, "pos", b.Cursor, 10)
+	if len(b.Items) != 0 {
+		t.Fatalf("after ack: %+v", b.Items)
+	}
+	// Other consumers still read everything.
+	if all, _ := s.Fetch(ctx, "all", 0, 10); len(all.Items) != 3 {
+		t.Fatalf("unfiltered consumer saw %d", len(all.Items))
+	}
+	// Back to all chats: nothing before the acknowledged offset returns.
+	if err := s.SetChats(ctx, "pos", nil); err != nil {
+		t.Fatal(err)
+	}
+	put(t, s, storage.KindChannel, msg(other, 4, 0, "d"))
+	b, _ = s.Fetch(ctx, "pos", 0, 10)
+	if len(b.Items) != 1 || b.Items[0].ID != 4 {
+		t.Fatalf("after clearing the filter: %+v", b.Items)
+	}
+}
+
+func TestStoreAddsChatIDsToOldConsumers(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(filepath.Join(t.TempDir(), "old.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// The table as v0.5.0 created it, with a consumer in it.
+	if _, err := db.SQL.Exec(`CREATE TABLE feed_consumers (
+		account TEXT NOT NULL, name TEXT NOT NULL,
+		committed INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (account, name));
+		INSERT INTO feed_consumers VALUES ('default', 'pos', 7, 7)`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // and again, on the next start
+		if _, err := NewStore(ctx, db, "default"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var committed int64
+	var chats string
+	if err := db.SQL.QueryRow(`SELECT committed, chat_ids FROM feed_consumers WHERE name = 'pos'`).Scan(&committed, &chats); err != nil {
+		t.Fatal(err)
+	}
+	if committed != 7 || chats != "" {
+		t.Fatalf("migrated consumer: committed %d, chat_ids %q", committed, chats)
+	}
+}

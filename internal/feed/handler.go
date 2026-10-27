@@ -17,6 +17,32 @@ import (
 // No topics means the whole chat.
 type Watch map[int64][]int
 
+// ServiceChat is Telegram's service account, which sends login codes. It
+// is never buffered, whatever the configuration says.
+const ServiceChat int64 = 777000
+
+// Scope is what the server buffers, set by the user in config.toml:
+// the listed chats, or with All every chat; with Allowed set, only those
+// chats either way. Agents can narrow what they read inside it, never
+// widen it.
+type Scope struct {
+	Chats   Watch
+	All     bool
+	Allowed []int64
+}
+
+// Enabled reports whether anything is buffered at all.
+func (s Scope) Enabled() bool { return s.All || len(s.Chats) > 0 }
+
+// Has reports whether messages of chat can be buffered.
+func (s Scope) Has(chat int64) bool {
+	if chat == ServiceChat || (len(s.Allowed) > 0 && !slices.Contains(s.Allowed, chat)) {
+		return false
+	}
+	_, listed := s.Chats[chat]
+	return listed || s.All
+}
+
 // Handler stores updates of watched chats.
 //
 // It never returns an error to gotd. gotd advances its in-memory pts after
@@ -28,7 +54,7 @@ type Watch map[int64][]int
 type Handler struct {
 	Store   *Store
 	Notify  *Notifier
-	Watch   Watch
+	Scope   Scope
 	Service *tele.Service // set before updates.Manager runs
 	Log     *slog.Logger
 
@@ -40,8 +66,8 @@ type Handler struct {
 }
 
 // NewHandler fills in the defaults.
-func NewHandler(store *Store, notify *Notifier, watch Watch, log *slog.Logger) *Handler {
-	return &Handler{Store: store, Notify: notify, Watch: watch, Log: log,
+func NewHandler(store *Store, notify *Notifier, scope Scope, log *slog.Logger) *Handler {
+	return &Handler{Store: store, Notify: notify, Scope: scope, Log: log,
 		Fatal: make(chan error, 1), Retries: 5, Backoff: 200 * time.Millisecond}
 }
 
@@ -69,7 +95,7 @@ func (h *Handler) Register(d tg.UpdateDispatcher) {
 	})
 	d.OnDeleteChannelMessages(func(ctx context.Context, _ tg.Entities, u *tg.UpdateDeleteChannelMessages) error {
 		chat := tele.MarkedID(storage.KindChannel, u.ChannelID)
-		if _, ok := h.Watch[chat]; !ok {
+		if !h.Scope.Has(chat) {
 			return nil
 		}
 		// No topic comes with a delete; deleting only rows that passed the
@@ -82,10 +108,10 @@ func (h *Handler) Register(d tg.UpdateDispatcher) {
 // keep decides whether a message of a watched chat is buffered. Topic
 // filters fail closed: a message whose topic cannot be told is dropped.
 func (h *Handler) keep(chat int64, m *tg.Message) bool {
-	topics, watched := h.Watch[chat]
-	if !watched {
+	if !h.Scope.Has(chat) {
 		return false
 	}
+	topics := h.Scope.Chats[chat] // listed topic filters apply under All too
 	if len(topics) == 0 {
 		return true
 	}

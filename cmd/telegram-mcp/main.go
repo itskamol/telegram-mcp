@@ -210,7 +210,8 @@ func runServe(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	fw, err := newFeedWiring(ctx, e, watch, log)
+	scope := feed.Scope{Chats: watch, All: e.cfg.WatchAll, Allowed: e.cfg.AllowedChatIDs}
+	fw, err := newFeedWiring(ctx, e, scope, log)
 	if err != nil {
 		return err
 	}
@@ -254,7 +255,7 @@ func runServe(ctx context.Context, args []string) error {
 			}
 			var feedTool *mcpserver.Feed
 			if fw != nil {
-				feedTool = &mcpserver.Feed{Store: fw.store, Notify: fw.handler.Notify}
+				feedTool = &mcpserver.Feed{Store: fw.store, Notify: fw.handler.Notify, Scope: scope}
 			}
 			full := mcpserver.New(svc, policy, auditLog, version, feedTool)
 			policy.ReadOnly = true
@@ -300,8 +301,8 @@ type feedWiring struct {
 
 // newFeedWiring returns nil when no chat is watched; serve then runs
 // without Telegram updates, as before.
-func newFeedWiring(ctx context.Context, e *env, watch map[int64][]int, log *slog.Logger) (*feedWiring, error) {
-	if len(watch) == 0 {
+func newFeedWiring(ctx context.Context, e *env, scope feed.Scope, log *slog.Logger) (*feedWiring, error) {
+	if !scope.Enabled() {
 		return nil, nil
 	}
 	store, err := feed.NewStore(ctx, e.db, e.account)
@@ -312,7 +313,7 @@ func newFeedWiring(ctx context.Context, e *env, watch map[int64][]int, log *slog
 	if err != nil {
 		return nil, err
 	}
-	h := feed.NewHandler(store, feed.NewNotifier(), feed.Watch(watch), log)
+	h := feed.NewHandler(store, feed.NewNotifier(), scope, log)
 	d := tg.NewUpdateDispatcher()
 	h.Register(d)
 	gaps := updates.New(updates.Config{Handler: d, Storage: state, AccessHasher: state, UserAccessHasher: state})

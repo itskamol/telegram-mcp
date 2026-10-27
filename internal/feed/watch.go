@@ -139,7 +139,7 @@ func (w *Watcher) follow(ctx context.Context) error {
 // about new messages; on a file created or replaced since, everything in
 // it is new, so it starts from zero.
 func (w *Watcher) start(ctx context.Context, conn *sql.Conn, original bool) (cursor, error) {
-	committed, found, err := w.committed(ctx, conn)
+	committed, _, found, err := w.consumer(ctx, conn)
 	if err != nil {
 		return cursor{}, err
 	}
@@ -165,7 +165,11 @@ func (w *Watcher) announce(ctx context.Context, conn *sql.Conn, c *cursor) error
 			c.hw = 0
 		}
 	}
-	notices, top, err := w.pending(ctx, conn, c.hw)
+	_, filter, _, err := w.consumer(ctx, conn)
+	if err != nil {
+		return err
+	}
+	notices, top, err := w.pending(ctx, conn, c.hw, filter)
 	if err != nil {
 		return err
 	}
@@ -180,13 +184,14 @@ func (w *Watcher) announce(ctx context.Context, conn *sql.Conn, c *cursor) error
 	return nil
 }
 
-// pending reads one Notice per chat with messages after hw, and the
-// highest seq among them, in one short read transaction.
-func (w *Watcher) pending(ctx context.Context, conn *sql.Conn, hw int64) ([]Notice, int64, error) {
+// pending reads one Notice per chat with messages after hw in the
+// consumer's chats, and the highest seq among them, in one short read
+// transaction.
+func (w *Watcher) pending(ctx context.Context, conn *sql.Conn, hw int64, filter string) ([]Notice, int64, error) {
 	rows, err := conn.QueryContext(ctx, `
 		SELECT chat_id, MIN(message_id), MAX(message_id), COUNT(*), MAX(seq)
-		FROM feed_messages WHERE account = ? AND seq > ?
-		GROUP BY chat_id ORDER BY MIN(seq)`, w.Account, hw)
+		FROM feed_messages WHERE account = ? AND seq > ? AND `+inChats+`
+		GROUP BY chat_id ORDER BY MIN(seq)`, w.Account, hw, filter, filter)
 	if isNoTable(err) {
 		return nil, hw, nil
 	}
@@ -212,7 +217,7 @@ func (w *Watcher) pending(ctx context.Context, conn *sql.Conn, hw int64) ([]Noti
 // announced messages stay unacknowledged for Stale, so they are announced
 // again in the same Notice format.
 func (w *Watcher) restale(ctx context.Context, conn *sql.Conn, c *cursor) error {
-	committed, found, err := w.committed(ctx, conn)
+	committed, _, found, err := w.consumer(ctx, conn)
 	if err != nil {
 		return err
 	}
@@ -234,17 +239,23 @@ func (w *Watcher) restale(ctx context.Context, conn *sql.Conn, c *cursor) error 
 	return nil
 }
 
-func (w *Watcher) committed(ctx context.Context, conn *sql.Conn) (int64, bool, error) {
-	var v int64
-	err := conn.QueryRowContext(ctx, `SELECT committed FROM feed_consumers WHERE account = ? AND name = ?`,
-		w.Account, w.Consumer).Scan(&v)
+// consumer reads the consumer's acknowledged offset and chat filter. A
+// server older than the chat_ids column has no filter.
+func (w *Watcher) consumer(ctx context.Context, conn *sql.Conn) (committed int64, filter string, found bool, err error) {
+	err = conn.QueryRowContext(ctx, `SELECT committed, chat_ids FROM feed_consumers WHERE account = ? AND name = ?`,
+		w.Account, w.Consumer).Scan(&committed, &filter)
+	if isNoColumn(err) {
+		filter = ""
+		err = conn.QueryRowContext(ctx, `SELECT committed FROM feed_consumers WHERE account = ? AND name = ?`,
+			w.Account, w.Consumer).Scan(&committed)
+	}
 	switch {
 	case errors.Is(err, sql.ErrNoRows), isNoTable(err):
-		return 0, false, nil
+		return 0, "", false, nil
 	case err != nil:
-		return 0, false, err
+		return 0, "", false, err
 	}
-	return v, true, nil
+	return committed, filter, true, nil
 }
 
 func (w *Watcher) counter(ctx context.Context, conn *sql.Conn) (int64, error) {
@@ -278,8 +289,13 @@ func (w *Watcher) emit(n Notice) error {
 // created the feed yet. SQLite gives it the generic SQLITE_ERROR code,
 // shared with syntax errors and others, so the message is checked too;
 // SQLITE_BUSY, I/O errors and anything not from SQLite never match.
-func isNoTable(err error) bool {
+func isNoTable(err error) bool { return isSQLiteError(err, "no such table") }
+
+// isNoColumn reports a column a server of an older version did not create.
+func isNoColumn(err error) bool { return isSQLiteError(err, "no such column") }
+
+func isSQLiteError(err error, msg string) bool {
 	var se *sqlite.Error
 	return errors.As(err, &se) && se.Code() == sqlite3.SQLITE_ERROR &&
-		strings.Contains(se.Error(), "no such table")
+		strings.Contains(se.Error(), msg)
 }
