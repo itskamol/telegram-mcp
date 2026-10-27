@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/itskamol/telegram-mcp-go/internal/feed"
 	"github.com/itskamol/telegram-mcp-go/internal/storage"
 	"github.com/itskamol/telegram-mcp-go/internal/tele"
+	"github.com/itskamol/telegram-mcp-go/internal/tele/teletest"
 )
 
 func TestChatRefUnmarshal(t *testing.T) {
@@ -341,5 +343,25 @@ func TestGetMeExposesVersion(t *testing.T) {
 	_, out, err := s.getMe(context.Background(), nil, noInput{})
 	if err != nil || out.Version != "9.9.9" {
 		t.Errorf("get_me answer: %+v %v", out, err)
+	}
+}
+
+// Editing a message to the text it already has is what a retry after a
+// timeout does; Telegram answers MESSAGE_NOT_MODIFIED, which is success.
+func TestEditToSameTextSucceeds(t *testing.T) {
+	log, err := audit.Open(filepath.Join(t.TempDir(), "audit.log"), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	inv := &teletest.Invoker{Err: tgerr.New(400, "MESSAGE_NOT_MODIFIED")}
+	s := &Server{svc: &tele.Service{API: tg.NewClient(inv), SelfID: 1}, audit: log}
+	in := editMessageIn{Chat: "me", MessageID: 5, Text: "same"}
+	if _, out, err := s.editMessage(context.Background(), nil, in); err != nil || !out.OK || !out.Unchanged {
+		t.Fatalf("same text: %+v %v", out, err)
+	}
+	inv.Err = tgerr.New(400, "MESSAGE_AUTHOR_REQUIRED")
+	if _, out, err := s.editMessage(context.Background(), nil, in); err == nil {
+		t.Fatalf("other errors must still fail: %+v", out)
 	}
 }

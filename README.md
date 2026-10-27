@@ -134,7 +134,8 @@ tool to the next:
   the key becomes Telegram's `random_id`, so a retry with the same key returns
   the message that was already sent (same `message_id`) instead of sending a
   second copy. A key counts per tool and chat. Timeouts of write tools say
-  whether a retry is safe.
+  whether a retry is safe. `edit_message` needs no key: editing a message
+  to the text it already has succeeds with `unchanged: true`.
 - **Paging**: `list_messages` and `search_messages` return `has_more` and
   `next_offset_id` to pass back as `offset_id`. `get_message` reads one
   message by id; a deleted id, or one from another chat, is an error that

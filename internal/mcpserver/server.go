@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/itskamol/telegram-mcp-go/internal/audit"
@@ -151,7 +152,8 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, 
 	add(srv, "forward_messages", "Forward Messages", writeAdd,
 		"Forward messages (ids from list_messages of from_chat) to another chat, or into one of its forum topics with topic_id.", s.forwardMessages)
 	add(srv, "edit_message", "Edit Message", writeChange,
-		"Replace the text of a message this account sent. parse_mode as in send_message.", s.editMessage)
+		"Replace the text of a message this account sent. parse_mode as in send_message. "+
+			"Editing to the text the message already has succeeds with unchanged=true, so a retry is safe.", s.editMessage)
 	add(srv, "delete_messages", "Delete Messages", writeChange,
 		"Delete messages from a chat; this cannot be undone. revoke=true deletes them for everyone, "+
 			"otherwise only for this account; in channels deletion is always for everyone.", s.deleteMessages)
@@ -575,23 +577,34 @@ type okOut struct {
 	OK bool `json:"ok"`
 }
 
-func (s *Server) editMessage(ctx context.Context, _ *mcp.CallToolRequest, in editMessageIn) (*mcp.CallToolResult, okOut, error) {
+type editOut struct {
+	OK bool `json:"ok"`
+	// Unchanged is set when the message already had this text: Telegram
+	// refuses such an edit, which is what a retry after a timeout sends.
+	Unchanged bool `json:"unchanged" jsonschema:"the message already had this text, so nothing changed"`
+}
+
+func (s *Server) editMessage(ctx context.Context, _ *mcp.CallToolRequest, in editMessageIn) (*mcp.CallToolResult, editOut, error) {
 	if in.MessageID <= 0 {
-		return nil, okOut{}, errors.New("message_id is required")
+		return nil, editOut{}, errors.New("message_id is required")
 	}
 	f, err := s.format(ctx, in.Text, in.ParseMode, maxTextLen)
 	if err != nil {
-		return nil, okOut{}, err
+		return nil, editOut{}, err
 	}
 	r, err := s.chat(ctx, in.Chat)
 	if err != nil {
-		return nil, okOut{}, err
+		return nil, editOut{}, err
 	}
 	err = s.svc.Edit(ctx, r, in.MessageID, f)
-	if err := s.record(audit.Entry{Tool: "edit_message", ChatID: r.Marked, IDs: []int{in.MessageID}}, err); err != nil {
-		return nil, okOut{}, err
+	unchanged := tgerr.Is(err, "MESSAGE_NOT_MODIFIED")
+	if unchanged {
+		err = nil
 	}
-	return nil, okOut{OK: true}, nil
+	if err := s.record(audit.Entry{Tool: "edit_message", ChatID: r.Marked, IDs: []int{in.MessageID}}, err); err != nil {
+		return nil, editOut{}, err
+	}
+	return nil, editOut{OK: true, Unchanged: unchanged}, nil
 }
 
 type deleteMessagesIn struct {
