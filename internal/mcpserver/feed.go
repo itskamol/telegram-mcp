@@ -29,10 +29,6 @@ type newMessagesIn struct {
 	AckCursor   int64  `json:"ack_cursor,omitempty" jsonschema:"cursor from the previous answer, once those messages are handled: acknowledges every message up to and including it, not the ones this call returns. Omit it and the same messages come again"`
 	Limit       int    `json:"limit,omitempty" jsonschema:"max messages, default 50, max 100"`
 	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"if nothing is new, wait up to this many seconds (max 45) for a message instead of answering empty"`
-	// Deprecated: set_feed_filter replaces it. It stays for one release so
-	// that sessions still holding the old tool list keep working; it does
-	// exactly what set_feed_filter(chat_ids) does, direction untouched.
-	ChatIDs *[]ChatRef `json:"chat_ids,omitempty" jsonschema:"deprecated, use set_feed_filter: the same as set_feed_filter with these chat_ids, saved for this consumer, its direction kept"`
 }
 
 // consumerName applies the default name and checks it.
@@ -50,11 +46,6 @@ func (s *Server) getNewMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 	consumer, err := consumerName(in.Consumer)
 	if err != nil {
 		return nil, feed.Batch{}, err
-	}
-	if in.ChatIDs != nil {
-		if _, _, err := s.setFilter(ctx, consumer, in.ChatIDs, ""); err != nil {
-			return nil, feed.Batch{}, err
-		}
 	}
 	if s.feed.Scope.All {
 		// Refuse before any message reaches the agent: a warning that came

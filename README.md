@@ -206,10 +206,9 @@ chooses its chats with `set_feed_filter` (see Filters below).
 - **A filter change applies after the acknowledged cursor.** One cursor
   serves all chats and both directions, so messages the old filter skipped
   before it never come back; `list_messages` still has them.
-- **`chat_ids` on `get_new_messages`** is deprecated and stays for one
-  release, for sessions that still hold the old tool list. It does what
-  `set_feed_filter(chat_ids=…)` does: it replaces the saved chats and keeps
-  the direction.
+- **`chat_ids` on `get_new_messages`** was removed in 0.8.0, after one
+  release as a deprecated alias. A session still holding the old tool list
+  gets an error naming the field; use `set_feed_filter(chat_ids=…)`.
 - **Edits** replace the buffered message and deliver it again, with the same
   `id` and `edited: true`; **deletes** remove it. `out: true` marks the
   account's own messages, except in Saved Messages (see above). A message

@@ -231,7 +231,7 @@ func TestOwnDeletesLeaveTheBuffer(t *testing.T) {
 }
 
 func TestFeedChatIDsIsTypedArray(t *testing.T) {
-	for _, schema := range []any{inputSchema[newMessagesIn](), inputSchema[feedFilterIn]()} {
+	for _, schema := range []any{inputSchema[feedFilterIn]()} {
 		b, _ := json.Marshal(schema)
 		var s struct {
 			Properties map[string]struct {
@@ -319,10 +319,10 @@ func TestFeedFilterContract(t *testing.T) {
 	if out["direction"] != "in" || fmt.Sprint(out["chat_ids"]) != "[]" || out["consumer"] != "bot" {
 		t.Fatalf("set: %v", out)
 	}
-	// The deprecated chat_ids of get_new_messages changes the chats only.
-	out, _ = call("get_new_messages", map[string]any{"consumer": "bot", "chat_ids": []any{}})
-	if f := out["filter"].(map[string]any); f["direction"] != "in" {
-		t.Fatalf("deprecated chat_ids reset the direction: %v", f)
+	// get_new_messages only reads: chat_ids, deprecated in 0.7.0, is gone,
+	// and the schema refuses it instead of ignoring it.
+	if _, errText := call("get_new_messages", map[string]any{"consumer": "bot", "chat_ids": []any{}}); !strings.Contains(errText, "chat_ids") {
+		t.Fatalf("get_new_messages accepted chat_ids: %q", errText)
 	}
 	// Only a consumer: the current filter, unchanged.
 	if out, _ = call("set_feed_filter", map[string]any{"consumer": "bot"}); out["direction"] != "in" {
