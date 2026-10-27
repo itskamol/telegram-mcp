@@ -76,6 +76,21 @@ func TestEveryToolDescribesItsParameters(t *testing.T) {
 	}
 }
 
+// is_contact is always present where it is known, and absent where it is
+// not: a missing field must not be read as "not a contact".
+func TestIsContactOnlyWhereKnown(t *testing.T) {
+	if b, _ := json.Marshal(tele.Chat{ID: 5}); !strings.Contains(string(b), `"is_contact":false`) {
+		t.Errorf("false is_contact dropped: %s", b)
+	}
+	tools := toolNames(t, connect(t, Policy{MaxDelete: 20}))
+	for name, want := range map[string]bool{"list_chats": true, "search_contacts": true, "resolve_username": false} {
+		b, _ := json.Marshal(tools[name].OutputSchema)
+		if got := strings.Contains(string(b), "is_contact"); got != want {
+			t.Errorf("%s output has is_contact = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestPage(t *testing.T) {
 	msgs := []tele.Message{{ID: 30}, {ID: 29}, {ID: 27}}
 	if p := page(msgs, 3); !p.HasMore || p.NextOffsetID != 27 {

@@ -82,7 +82,8 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, 
 	add(srv, "get_me", "Get Me", readTelegram,
 		"Return the logged-in account (id, name, username) and the current local time; message dates use the same time zone.", s.getMe)
 	add(srv, "list_chats", "List Chats", readTelegram,
-		"List chats (private, groups, channels), most recent first, with ids, unread counts and is_contact. "+
+		"List chats (private, groups, channels), most recent first, with ids, unread counts and is_contact "+
+			"(true for users in your contacts, false for everyone and everything else). "+
 			"Pass query to find a chat by title or @username. Use a chat's id as chat in other tools."+untrusted, s.listChats)
 	add(srv, "resolve_username", "Resolve Username", readTelegram,
 		"Look up a public @username (user, group or channel) and return its chat id, kind and title."+untrusted, s.resolveUsername)
@@ -281,12 +282,22 @@ type usernameIn struct {
 	Username string `json:"username" jsonschema:"public username, with or without @"`
 }
 
-func (s *Server) resolveUsername(ctx context.Context, _ *mcp.CallToolRequest, in usernameIn) (*mcp.CallToolResult, tele.Chat, error) {
+// resolvedOut is a Chat without is_contact: a username answered from the
+// peer cache cannot tell, and a false there would read as "a stranger".
+type resolvedOut struct {
+	ID       int64  `json:"id"`
+	Kind     string `json:"kind"`
+	Title    string `json:"title"`
+	Username string `json:"username,omitempty"`
+}
+
+func (s *Server) resolveUsername(ctx context.Context, _ *mcp.CallToolRequest, in usernameIn) (*mcp.CallToolResult, resolvedOut, error) {
 	r, err := s.svc.ResolveUsername(ctx, strings.TrimPrefix(strings.TrimSpace(in.Username), "@"))
 	if err != nil {
-		return nil, tele.Chat{}, err
+		return nil, resolvedOut{}, err
 	}
-	return nil, tele.ChatOf(r), nil
+	c := tele.ChatOf(r)
+	return nil, resolvedOut{ID: c.ID, Kind: c.Kind, Title: c.Title, Username: c.Username}, nil
 }
 
 type searchContactsIn struct {

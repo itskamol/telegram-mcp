@@ -117,8 +117,9 @@ tool to the next:
 - **`chat`** (also `from_chat`, `to_chat`) takes the `id` from `list_chats` as
   a number or a string (Bot API style: users positive, groups negative,
   channels `-100…`), an `@username`, or `me`. `list_chats query=` finds a chat
-  by title; `search_contacts` lists contacts first and marks them
-  `is_contact`, so a stranger with the same name is not mistaken for one.
+  by title; `search_contacts` lists contacts first. Both always return
+  `is_contact` (`true` only for users in the account's contacts), so a
+  stranger with the same name is not mistaken for one.
 - **Replies and topics**: `reply_to` and `topic_id` work the same in
   `send_message` and `send_file`; `list_topics` gives topic ids.
 - **`parse_mode`**: `plain` (default), `markdown` (CommonMark: `**bold**`,

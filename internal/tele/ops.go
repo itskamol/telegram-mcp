@@ -27,8 +27,9 @@ type Chat struct {
 	Username string `json:"username,omitempty"`
 	Unread   int    `json:"unread,omitempty"`
 	// IsContact marks users in the account's contact list, so an agent can
-	// tell "my Ali" from a stranger with the same name.
-	IsContact bool `json:"is_contact,omitempty"`
+	// tell "my Ali" from a stranger with the same name. Always present: a
+	// missing field read as "unknown", not as "not a contact".
+	IsContact bool `json:"is_contact"`
 }
 
 // maxDialogScan bounds how many dialogs a title search walks through.
