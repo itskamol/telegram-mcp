@@ -7,6 +7,7 @@ import (
 
 	"github.com/gotd/td/telegram/message/entity"
 	"github.com/gotd/td/telegram/message/html"
+	"github.com/gotd/td/telegram/message/markdown"
 	"github.com/gotd/td/tg"
 
 	"github.com/itskamol/telegram-mcp-go/internal/sanitize"
@@ -15,8 +16,9 @@ import (
 
 // Parse modes accepted by the send and edit tools.
 const (
-	ModePlain = "plain"
-	ModeHTML  = "html"
+	ModePlain    = "plain"
+	ModeMarkdown = "markdown"
+	ModeHTML     = "html"
 )
 
 // Formatted is message text with its Telegram formatting entities.
@@ -30,17 +32,49 @@ type Formatted struct {
 // tg://user?id= links to users; a link it cannot resolve is kept as plain
 // text (gotd drops the entity rather than failing).
 func ParseHTML(text string, resolve entity.UserResolver) (Formatted, error) {
-	if resolve == nil {
-		resolve = func(id int64) (tg.InputUserClass, error) {
-			return nil, fmt.Errorf("user mentions are not supported here")
-		}
-	}
 	var b entity.Builder
-	if err := html.HTML(strings.NewReader(text), &b, html.Options{UserResolver: resolve}); err != nil {
+	if err := html.HTML(strings.NewReader(text), &b, html.Options{UserResolver: orNoMentions(resolve)}); err != nil {
 		return Formatted{}, fmt.Errorf("invalid HTML: %w", err)
 	}
 	t, ents := b.Complete()
 	return Formatted{Text: t, Entities: ents}, nil
+}
+
+// ParseMarkdown converts CommonMark (**bold**, *italic*, ~~strike~~,
+// `code`, fenced code, [links](url), > quotes, ||spoiler||) into plain text
+// plus entities. It is lenient: unmatched markup stays as literal text.
+// Headings and lists have no Telegram entity and stay as plain text.
+func ParseMarkdown(text string, resolve entity.UserResolver) (Formatted, error) {
+	var b entity.Builder
+	if err := markdown.Markdown(strings.NewReader(text), &b, markdown.Options{UserResolver: orNoMentions(resolve)}); err != nil {
+		return Formatted{}, fmt.Errorf("invalid Markdown: %w", err)
+	}
+	t, ents := b.Complete()
+	return Formatted{Text: t, Entities: ents}, nil
+}
+
+// Format applies a parse mode ("" means plain).
+func Format(text, mode string, resolve entity.UserResolver) (Formatted, error) {
+	switch mode {
+	case "", ModePlain:
+		return Formatted{Text: text}, nil
+	case ModeMarkdown:
+		return ParseMarkdown(text, resolve)
+	case ModeHTML:
+		return ParseHTML(text, resolve)
+	}
+	return Formatted{}, fmt.Errorf("parse_mode must be %q, %q or %q", ModePlain, ModeMarkdown, ModeHTML)
+}
+
+// orNoMentions keeps gotd from building mentions out of bare user IDs,
+// which do not work for user accounts.
+func orNoMentions(resolve entity.UserResolver) entity.UserResolver {
+	if resolve != nil {
+		return resolve
+	}
+	return func(int64) (tg.InputUserClass, error) {
+		return nil, fmt.Errorf("user mentions are not supported here")
+	}
 }
 
 // MentionResolver resolves tg://user?id= links through the peer cache, so

@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -21,15 +20,15 @@ import (
 	"github.com/itskamol/telegram-mcp-go/internal/tele"
 )
 
-// Preview limits for open_photo: what the model sees, not the original.
+// Preview limits for view_photo: what the model sees, not the original.
 const (
 	previewMaxSide  = 1280
 	previewMaxBytes = 5 << 20
 )
 
 type mediaIn struct {
-	Chat      string `json:"chat" jsonschema:"chat id (as a string), @username, or me"`
-	MessageID int    `json:"message_id" jsonschema:"id of the message with the attachment"`
+	Chat      ChatRef `json:"chat" jsonschema:"chat id from list_chats (number or string), @username, or me"`
+	MessageID int     `json:"message_id" jsonschema:"id of the message with the attachment, from list_messages"`
 }
 
 func (s *Server) media(ctx context.Context, in mediaIn) (tele.MediaFile, error) {
@@ -52,10 +51,10 @@ func (s *Server) getMediaInfo(ctx context.Context, _ *mcp.CallToolRequest, in me
 }
 
 type downloadIn struct {
-	Chat      string `json:"chat" jsonschema:"chat id (as a string), @username, or me"`
-	MessageID int    `json:"message_id" jsonschema:"id of the message with the attachment"`
-	Dir       string `json:"dir,omitempty" jsonschema:"existing directory inside allowed_roots; relative paths are under the first root; default is the first root"`
-	FileName  string `json:"file_name,omitempty" jsonschema:"file name only, no directories; default is the original name"`
+	Chat      ChatRef `json:"chat" jsonschema:"chat id from list_chats (number or string), @username, or me"`
+	MessageID int     `json:"message_id" jsonschema:"id of the message with the attachment, from list_messages"`
+	Dir       string  `json:"dir,omitempty" jsonschema:"existing directory inside the allowed directories; a relative dir is inside the first one, which is the default"`
+	FileName  string  `json:"file_name,omitempty" jsonschema:"file name only, no directories; default is the original name"`
 }
 
 type downloadOut struct {
@@ -96,7 +95,7 @@ func (s *Server) downloadMedia(ctx context.Context, _ *mcp.CallToolRequest, in d
 	return nil, downloadOut{Path: path, Size: f.Info.Size, MimeType: f.Info.MimeType}, nil
 }
 
-func (s *Server) openPhoto(ctx context.Context, _ *mcp.CallToolRequest, in mediaIn) (*mcp.CallToolResult, any, error) {
+func (s *Server) viewPhoto(ctx context.Context, _ *mcp.CallToolRequest, in mediaIn) (*mcp.CallToolResult, any, error) {
 	f, err := s.media(ctx, in)
 	if err != nil {
 		return nil, nil, err
@@ -130,14 +129,17 @@ const maxCaptionLen = 1024
 const maxPhotoSize = 10 << 20
 
 type sendFileIn struct {
-	Chat       string `json:"chat" jsonschema:"chat id (as a string), @username, or me"`
-	Path       string `json:"path" jsonschema:"file inside allowed_roots; relative paths are under the first root"`
-	Caption    string `json:"caption,omitempty" jsonschema:"optional caption, up to 1024 characters after formatting"`
-	ParseMode  string `json:"parse_mode,omitempty" jsonschema:"plain (default) or html, for the caption"`
-	AsDocument bool   `json:"as_document,omitempty" jsonschema:"send images as files instead of compressed photos"`
-	ReplyTo    int    `json:"reply_to,omitempty" jsonschema:"message id to reply to"`
-	TopicID    int    `json:"topic_id,omitempty" jsonschema:"forum topic id from list_topics"`
+	Chat           ChatRef `json:"chat" jsonschema:"chat id from list_chats (number or string), @username, or me"`
+	Path           string  `json:"path" jsonschema:"file inside the allowed directories; a relative path is inside the first one"`
+	Caption        string  `json:"caption,omitempty" jsonschema:"optional caption, up to 1024 characters after formatting"`
+	ParseMode      string  `json:"parse_mode,omitempty" jsonschema:"plain (default), markdown or html, for the caption"`
+	AsDocument     bool    `json:"as_document,omitempty" jsonschema:"send images as files instead of compressed photos"`
+	ReplyTo        int     `json:"reply_to,omitempty" jsonschema:"id of a message in this chat to reply to"`
+	TopicID        int     `json:"topic_id,omitempty" jsonschema:"forum topic id from list_topics"`
+	IdempotencyKey string  `json:"idempotency_key,omitempty" jsonschema:"any unique string for this file; retrying with the same key never sends twice"`
 }
+
+func (in sendFileIn) idempotencyKey() string { return in.IdempotencyKey }
 
 func (s *Server) sendFile(ctx context.Context, _ *mcp.CallToolRequest, in sendFileIn) (*mcp.CallToolResult, sentOut, error) {
 	// The file check comes first: it is the guard against exfiltration.
@@ -155,11 +157,8 @@ func (s *Server) sendFile(ctx context.Context, _ *mcp.CallToolRequest, in sendFi
 
 	var caption tele.Formatted
 	if in.Caption != "" {
-		if caption, err = s.format(ctx, in.Caption, in.ParseMode); err != nil {
+		if caption, err = s.format(ctx, in.Caption, in.ParseMode, maxCaptionLen); err != nil {
 			return nil, sentOut{}, fmt.Errorf("caption: %w", err)
-		}
-		if n := utf8.RuneCountInString(caption.Text); n > maxCaptionLen {
-			return nil, sentOut{}, fmt.Errorf("caption is %d characters; Telegram allows %d", n, maxCaptionLen)
 		}
 	}
 
@@ -173,11 +172,9 @@ func (s *Server) sendFile(ctx context.Context, _ *mcp.CallToolRequest, in sendFi
 		AsPhoto: !in.AsDocument && fi.Size() <= maxPhotoSize &&
 			(mimeType == "image/jpeg" || mimeType == "image/png" || mimeType == "image/webp"),
 	}
-	id, err := s.svc.SendFile(ctx, r, up, caption, in.ReplyTo, in.TopicID)
-	if err := s.record(audit.Entry{Tool: "send_file", ChatID: r.Marked, IDs: nonZero(id), Path: f.Name()}, err); err != nil {
-		return nil, sentOut{}, err
-	}
-	return nil, sentOut{ChatID: r.Marked, MessageID: id}, nil
+	key := scopedKey("send_file", r.Marked, in.IdempotencyKey)
+	id, err := s.svc.SendFile(ctx, r, up, caption, in.ReplyTo, in.TopicID, tele.RandomID(key, 0))
+	return s.sent("send_file", r.Marked, id, in.ReplyTo, f.Name(), err)
 }
 
 // sniffMIME guesses the type from the extension, then from the content.

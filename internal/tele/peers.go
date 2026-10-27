@@ -110,7 +110,7 @@ func (s *Service) resolveID(ctx context.Context, marked int64) (Resolved, error)
 	}
 	p, err := s.Peers.Get(ctx, kind, id)
 	if errors.Is(err, storage.ErrPeerNotCached) {
-		if _, err := s.Dialogs(ctx, 200); err != nil {
+		if _, err := s.Dialogs(ctx, 200, ""); err != nil {
 			return Resolved{}, err
 		}
 		p, err = s.Peers.Get(ctx, kind, id)

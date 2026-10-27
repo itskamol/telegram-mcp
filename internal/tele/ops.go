@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gotd/td/telegram/message/peer"
+	"github.com/gotd/td/telegram/query/dialogs"
 	"github.com/gotd/td/tg"
 
 	"github.com/itskamol/telegram-mcp-go/internal/sanitize"
@@ -23,7 +25,13 @@ type Chat struct {
 	Title    string `json:"title"`
 	Username string `json:"username,omitempty"`
 	Unread   int    `json:"unread,omitempty"`
+	// IsContact marks users in the account's contact list, so an agent can
+	// tell "my Ali" from a stranger with the same name.
+	IsContact bool `json:"is_contact,omitempty"`
 }
+
+// maxDialogScan bounds how many dialogs a title search walks through.
+const maxDialogScan = 1000
 
 // Message is one message as the tools return it.
 type Message struct {
@@ -41,26 +49,24 @@ type Message struct {
 	Service  string `json:"service,omitempty"`
 }
 
-// Dialogs lists the most recent chats and refreshes the peer cache.
-func (s *Service) Dialogs(ctx context.Context, limit int) ([]Chat, error) {
-	res, err := s.API.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
-		OffsetPeer: &tg.InputPeerEmpty{},
-		Limit:      limit,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("get dialogs: %w", err)
+// Dialogs lists chats, most recent first, and refreshes the peer cache.
+// With a query only chats whose title or username contains it (case
+// insensitive) are returned, searching up to maxDialogScan dialogs.
+func (s *Service) Dialogs(ctx context.Context, limit int, query string) ([]Chat, error) {
+	query = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(query), "@"))
+	scan := limit
+	if query != "" {
+		scan = maxDialogScan
 	}
-	d, ok := res.AsModified()
-	if !ok {
-		return nil, nil
-	}
-	if err := s.cache(ctx, d.GetUsers(), d.GetChats()); err != nil {
-		return nil, err
-	}
-
-	out := make([]Chat, 0, len(d.GetDialogs()))
-	for _, dc := range d.GetDialogs() {
-		dlg, ok := dc.(*tg.Dialog)
+	// Telegram returns at most 100 dialogs per call; the iterator pages.
+	it := dialogs.NewQueryBuilder(s.API).GetDialogs().BatchSize(min(scan, 100)).Iter()
+	var out []Chat
+	for seen := 0; seen < scan && len(out) < limit && it.Next(ctx); seen++ {
+		e := it.Value()
+		if err := s.cache(ctx, usersOf(e.Entities), chatsOf(e.Entities)); err != nil {
+			return nil, err
+		}
+		dlg, ok := e.Dialog.(*tg.Dialog)
 		if !ok {
 			continue // folders
 		}
@@ -69,19 +75,48 @@ func (s *Service) Dialogs(ctx context.Context, limit int) ([]Chat, error) {
 		if p, err := s.Peers.Get(ctx, kind, id); err == nil {
 			c.Title, c.Username = sanitize.Name(p.Title), sanitize.Name(p.Username)
 		}
+		if u, ok := e.Entities.Users()[id]; ok && kind == storage.KindUser {
+			c.IsContact = u.Contact
+		}
 		if kind == storage.KindUser && id == s.SelfID {
 			c.Title = "Saved Messages"
 		}
+		if query != "" && !matches(c, query) {
+			continue
+		}
 		out = append(out, c)
 	}
-	// Pinned dialogs come on top of the limit, so trim to what was asked.
-	if len(out) > limit {
-		out = out[:limit]
+	if err := it.Err(); err != nil {
+		return nil, fmt.Errorf("get dialogs: %w", err)
 	}
 	return out, nil
 }
 
-// SearchContacts searches your contacts and global usernames by name.
+func matches(c Chat, query string) bool {
+	return strings.Contains(strings.ToLower(c.Title), query) || strings.Contains(strings.ToLower(c.Username), query)
+}
+
+func usersOf(e peer.Entities) []tg.UserClass {
+	out := make([]tg.UserClass, 0, len(e.Users()))
+	for _, u := range e.Users() {
+		out = append(out, u)
+	}
+	return out
+}
+
+func chatsOf(e peer.Entities) []tg.ChatClass {
+	out := make([]tg.ChatClass, 0, len(e.Chats())+len(e.Channels()))
+	for _, c := range e.Chats() {
+		out = append(out, c)
+	}
+	for _, c := range e.Channels() {
+		out = append(out, c)
+	}
+	return out
+}
+
+// SearchContacts searches contacts and known chats first, then public
+// users and chats. Contacts are listed first and marked IsContact.
 func (s *Service) SearchContacts(ctx context.Context, q string, limit int) ([]Chat, error) {
 	res, err := s.API.ContactsSearch(ctx, &tg.ContactsSearchRequest{Q: q, Limit: limit})
 	if err != nil {
@@ -90,6 +125,12 @@ func (s *Service) SearchContacts(ctx context.Context, q string, limit int) ([]Ch
 	if err := s.cache(ctx, res.Users, res.Chats); err != nil {
 		return nil, err
 	}
+	contact := map[int64]bool{}
+	for _, u := range res.Users {
+		if u, ok := u.(*tg.User); ok {
+			contact[u.ID] = u.Contact
+		}
+	}
 	var out []Chat
 	for _, p := range slices.Concat(res.MyResults, res.Results) {
 		kind, id := peerKind(p)
@@ -97,12 +138,21 @@ func (s *Service) SearchContacts(ctx context.Context, q string, limit int) ([]Ch
 		if err != nil {
 			continue
 		}
-		c := Chat{ID: MarkedID(kind, id), Kind: kind, Title: sanitize.Name(pr.Title), Username: sanitize.Name(pr.Username)}
+		c := Chat{ID: MarkedID(kind, id), Kind: kind, Title: sanitize.Name(pr.Title), Username: sanitize.Name(pr.Username),
+			IsContact: kind == storage.KindUser && contact[id]}
 		if !slices.ContainsFunc(out, func(x Chat) bool { return x.ID == c.ID }) {
 			out = append(out, c)
 		}
 	}
+	slices.SortStableFunc(out, func(a, b Chat) int { return boolRank(b.IsContact) - boolRank(a.IsContact) })
 	return out, nil
+}
+
+func boolRank(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // History returns messages older than offsetID (0 = newest), newest first.
@@ -116,10 +166,11 @@ func (s *Service) History(ctx context.Context, r Resolved, limit, offsetID int) 
 	return s.messages(ctx, res)
 }
 
-// Search finds messages in one chat containing q.
-func (s *Service) Search(ctx context.Context, r Resolved, q string, limit int) ([]Message, error) {
+// Search finds messages in one chat containing q, newest first, older
+// than offsetID when it is set.
+func (s *Service) Search(ctx context.Context, r Resolved, q string, limit, offsetID int) ([]Message, error) {
 	res, err := s.API.MessagesSearch(ctx, &tg.MessagesSearchRequest{
-		Peer: r.Input, Q: q, Filter: &tg.InputMessagesFilterEmpty{}, Limit: limit,
+		Peer: r.Input, Q: q, Filter: &tg.InputMessagesFilterEmpty{}, Limit: limit, OffsetID: offsetID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("search messages: %w", err)
@@ -142,10 +193,10 @@ func (s *Service) Get(ctx context.Context, r Resolved, ids []int) ([]Message, er
 }
 
 // Send posts text, optionally as a reply and/or into a forum topic, and
-// returns the new message ID.
-func (s *Service) Send(ctx context.Context, r Resolved, f Formatted, replyTo, topicID int) (int, error) {
+// returns the new message ID. randomID comes from RandomID.
+func (s *Service) Send(ctx context.Context, r Resolved, f Formatted, replyTo, topicID int, randomID int64) (int, error) {
 	req := &tg.MessagesSendMessageRequest{
-		Peer: r.Input, Message: f.Text, Entities: f.Entities, RandomID: randomID(),
+		Peer: r.Input, Message: f.Text, Entities: f.Entities, RandomID: randomID,
 		ReplyTo: replyTarget(replyTo, topicID),
 	}
 	upd, err := s.API.MessagesSendMessage(ctx, req)
@@ -169,11 +220,12 @@ func replyTarget(replyTo, topicID int) tg.InputReplyToClass {
 	return nil
 }
 
-// Forward copies messages from one chat to another and returns the new IDs.
-func (s *Service) Forward(ctx context.Context, from Resolved, ids []int, to Resolved) ([]int, error) {
+// Forward copies messages from one chat to another and returns the new
+// IDs. With an idempotency key a retry cannot forward them twice.
+func (s *Service) Forward(ctx context.Context, from Resolved, ids []int, to Resolved, key string) ([]int, error) {
 	rnd := make([]int64, len(ids))
 	for i := range rnd {
-		rnd[i] = randomID()
+		rnd[i] = RandomID(key, i)
 	}
 	upd, err := s.API.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
 		FromPeer: from.Input, ID: ids, RandomID: rnd, ToPeer: to.Input,
@@ -364,4 +416,6 @@ func randomID() int64 {
 	return int64(binary.LittleEndian.Uint64(b[:]))
 }
 
-func unix(t int) string { return time.Unix(int64(t), 0).UTC().Format(time.RFC3339) }
+// unix formats a Telegram timestamp in the machine's local time zone with
+// its offset (2026-10-27T09:30:00+05:00), so "today" means the user's today.
+func unix(t int) string { return time.Unix(int64(t), 0).Local().Format(time.RFC3339) }

@@ -213,7 +213,7 @@ type Upload struct {
 
 // SendFile uploads a file and posts it with an optional caption, reply and
 // topic. It returns the new message ID.
-func (s *Service) SendFile(ctx context.Context, r Resolved, up Upload, caption Formatted, replyTo, topicID int) (int, error) {
+func (s *Service) SendFile(ctx context.Context, r Resolved, up Upload, caption Formatted, replyTo, topicID int, randomID int64) (int, error) {
 	in, err := uploader.NewUploader(s.API).Upload(ctx, uploader.NewUpload(up.Name, up.File, up.Size))
 	if err != nil {
 		return 0, fmt.Errorf("upload: %w", err)
@@ -230,7 +230,7 @@ func (s *Service) SendFile(ctx context.Context, r Resolved, up Upload, caption F
 		}
 	}
 	req := &tg.MessagesSendMediaRequest{
-		Peer: r.Input, Media: media, Message: caption.Text, Entities: caption.Entities, RandomID: randomID(),
+		Peer: r.Input, Media: media, Message: caption.Text, Entities: caption.Entities, RandomID: randomID,
 		ReplyTo: replyTarget(replyTo, topicID),
 	}
 	upd, err := s.API.MessagesSendMedia(ctx, req)

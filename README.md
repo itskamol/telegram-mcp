@@ -94,24 +94,41 @@ claude mcp add telegram -- telegram-mcp serve
 | Read | Write |
 |---|---|
 | `get_me` | `send_message` |
-| `list_chats` | `reply_to_message` |
-| `resolve_username` | `forward_message` |
+| `list_chats` | `send_file` |
+| `resolve_username` | `forward_messages` |
 | `search_contacts` | `edit_message` (destructive) |
-| `list_messages` | `delete_message` (destructive) |
-| `search_messages` | `mark_as_read` |
-| `list_topics` | `send_file` |
-| `get_media_info` | `download_media` (local disk only) |
-| `open_photo` | |
+| `list_messages` | `delete_messages` (destructive) |
+| `search_messages` | `mark_chat_read` |
+| `list_topics` | `download_media` (local disk only) |
+| `get_media_info` | |
+| `view_photo` | |
 
-`send_message`, `reply_to_message` and `edit_message` take `parse_mode`:
-`plain` (default) or `html` (Telegram HTML: `<b> <i> <u> <s> <code> <pre>
-<a href> <blockquote> <tg-spoiler>`). Formatting is parsed locally, so broken
-HTML fails before anything is sent. In forum supergroups, `list_topics` gives
-topic IDs for the `topic_id` argument of `list_messages`, `send_message` and
-`reply_to_message`.
+Conventions the tools share, so a model can carry what it learned from one
+tool to the next:
 
-Chats are addressed by the `id` from `list_chats` (Bot API style: users
-positive, groups negative, channels `-100…`), by `@username`, or `me`.
+- **Names** are `verb_noun`: `list_` returns a collection, `get_` one object,
+  `search_` a query; plural nouns take several ids (`delete_messages`).
+- **`chat`** (also `from_chat`, `to_chat`) takes the `id` from `list_chats` as
+  a number or a string (Bot API style: users positive, groups negative,
+  channels `-100…`), an `@username`, or `me`. `list_chats query=` finds a chat
+  by title; `search_contacts` lists contacts first and marks them
+  `is_contact`, so a stranger with the same name is not mistaken for one.
+- **Replies and topics**: `reply_to` and `topic_id` work the same in
+  `send_message` and `send_file`; `list_topics` gives topic ids.
+- **`parse_mode`**: `plain` (default), `markdown` (CommonMark: `**bold**`,
+  `*italic*`, `` `code` ``, `[text](url)`, `> quote`, `||spoiler||`) or `html`.
+  Markup is parsed locally, so broken markup fails before anything is sent,
+  and the length limits apply to the text after markup is removed.
+- **`idempotency_key`** on `send_message`, `send_file` and `forward_messages`:
+  retrying with the same key cannot send twice (Telegram rejects the repeated
+  `random_id`), and the tool then answers `already_sent: true`. Timeouts of
+  write tools say whether a retry is safe.
+- **Paging**: `list_messages` and `search_messages` return `has_more` and
+  `next_offset_id` to pass back as `offset_id`.
+- **Dates** are in the machine's local time zone with their UTC offset;
+  `get_me` returns the current local time.
+- **Errors** say what to do next; Telegram's code stays in brackets, e.g.
+  `only messages sent by this account can be edited [MESSAGE_AUTHOR_REQUIRED]`.
 
 ## Safety settings
 
@@ -120,7 +137,7 @@ All optional, in `config.toml`:
 ```toml
 read_only = true                         # register only the read tools (also: serve --read-only)
 allowed_chat_ids = [123456789, -1001234567890]  # restrict every tool to these chats
-max_delete = 20                          # message IDs per delete_message call
+max_delete = 20                          # message IDs per delete_messages call
 allowed_roots = ["~/Downloads/telegram-mcp"]  # where download_media may write (this is the default)
 max_download_mb = 50                     # per file
 max_upload_mb = 50                       # per send_file file
@@ -129,7 +146,7 @@ max_upload_mb = 50                       # per send_file file
 - Text from Telegram is returned as JSON with invisible and control characters
   stripped, and tool descriptions tell the model not to follow instructions in it.
 - Outside channels Telegram deletes by message ID alone, with no chat attached.
-  `delete_message` first checks that every ID belongs to the chat you named
+  `delete_messages` first checks that every ID belongs to the chat you named
   and refuses otherwise.
 - Every write is appended to `~/.local/state/telegram-mcp/audit.log` (tool, chat,
   message IDs, error) without message text.
@@ -140,7 +157,7 @@ max_upload_mb = 50                       # per send_file file
   only reads regular files inside `allowed_roots`, refuses hidden paths such
   as `.env` or `.ssh/` (also through symlinks), and checks that the file it
   opened is the one it validated.
-- `open_photo` shows the model a copy scaled to at most 1280 px (5 MB cap).
+- `view_photo` shows the model a copy scaled to at most 1280 px (5 MB cap).
 - Flood waits up to a minute are absorbed; each tool call times out after 55 s.
 
 ## Where files live
@@ -185,7 +202,7 @@ destination file already exists or a server is still running from the old place.
 - [x] MCP server over stdio with flood-wait handling and per-tool timeouts
 - [x] 12 core tools (see [Tools](#tools))
 - [x] Safety: output sanitizing, chat allowlist, read-only mode, audit log
-- [x] Media: `get_media_info`, `download_media` (allowed roots, size limit), `open_photo`
+- [x] Media: `get_media_info`, `download_media` (allowed roots, size limit), `view_photo`
 - [x] HTML formatting for sent messages, forum topics
 - [x] One-line installer, `install claude-desktop|claude-code`
 - [x] Homebrew tap (`brew install itskamol/tap/telegram-mcp`)

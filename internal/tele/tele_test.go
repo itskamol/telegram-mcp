@@ -1,9 +1,14 @@
 package tele
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
 	"github.com/itskamol/telegram-mcp-go/internal/storage"
 )
@@ -108,5 +113,70 @@ func TestParseHTML(t *testing.T) {
 	// stays, nobody gets mentioned.
 	if f, err := ParseHTML(`<a href="tg://user?id=1">x</a>`, nil); err != nil || f.Text != "x" || len(f.Entities) != 0 {
 		t.Errorf("unresolvable mention: %q %v %v", f.Text, f.Entities, err)
+	}
+}
+
+func TestExplain(t *testing.T) {
+	cases := map[string]string{
+		"MESSAGE_NOT_MODIFIED": "nothing was changed",
+		"PEER_ID_INVALID":      "list_chats",
+		"FLOOD_WAIT_30":        "wait 30 seconds",
+		"SLOWMODE_WAIT_10":     "slow mode",
+	}
+	for msg, want := range cases {
+		if got := Explain(tgerr.New(400, msg)).Error(); !strings.Contains(got, want) || !strings.Contains(got, "[") {
+			t.Errorf("%s: %q", msg, got)
+		}
+	}
+	unknown := tgerr.New(400, "SOMETHING_NEW")
+	if Explain(unknown) != error(unknown) {
+		t.Error("unknown RPC error changed")
+	}
+	plain := errors.New("plain")
+	if Explain(plain) != plain {
+		t.Error("non-RPC error changed")
+	}
+	if !IsDuplicate(fmt.Errorf("send: %w", tgerr.New(400, "RANDOM_ID_DUPLICATE"))) {
+		t.Error("wrapped duplicate not detected")
+	}
+}
+
+func TestFormatModes(t *testing.T) {
+	f, err := Format("**qalin** va [havola](https://example.uz) `kod`", ModeMarkdown, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Text != "qalin va havola kod" || len(f.Entities) != 3 {
+		t.Fatalf("markdown: %q %v", f.Text, f.Entities)
+	}
+	// snake_case identifiers must not turn into italics.
+	if f, _ := Format("call get_me_now please", ModeMarkdown, nil); f.Text != "call get_me_now please" || len(f.Entities) != 0 {
+		t.Errorf("snake_case: %q %v", f.Text, f.Entities)
+	}
+	if f, _ := Format("**not bold**", ModePlain, nil); f.Text != "**not bold**" {
+		t.Errorf("plain changed text: %q", f.Text)
+	}
+	if _, err := Format("x", "rich", nil); err == nil {
+		t.Error("unknown mode accepted")
+	}
+}
+
+func TestDatesAreLocal(t *testing.T) {
+	got := unix(1_700_000_000)
+	want := time.Unix(1_700_000_000, 0).Local().Format(time.RFC3339)
+	if got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
+
+func TestMatches(t *testing.T) {
+	c := Chat{Title: "Ish Guruhi", Username: "work_team"}
+	for _, q := range []string{"ish", "guruhi", "work", "team"} {
+		if !matches(c, q) {
+			t.Errorf("%q did not match", q)
+		}
+	}
+	if matches(c, "oila") {
+		t.Error("unrelated query matched")
 	}
 }

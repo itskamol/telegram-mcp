@@ -51,14 +51,14 @@ func toolNames(t *testing.T, cs *mcp.ClientSession) map[string]*mcp.Tool {
 }
 
 var (
-	readTools  = []string{"get_me", "list_chats", "resolve_username", "search_contacts", "list_messages", "search_messages", "list_topics", "get_media_info", "open_photo"}
-	writeTools = []string{"send_message", "reply_to_message", "forward_message", "edit_message", "delete_message", "mark_as_read", "send_file"}
+	readTools  = []string{"get_me", "list_chats", "resolve_username", "search_contacts", "list_messages", "search_messages", "list_topics", "get_media_info", "view_photo"}
+	writeTools = []string{"send_message", "send_file", "forward_messages", "edit_message", "delete_messages", "mark_chat_read"}
 )
 
 func TestToolList(t *testing.T) {
 	tools := toolNames(t, connect(t, Policy{MaxDelete: 20}))
-	if len(tools) != 17 {
-		t.Fatalf("got %d tools, want 17", len(tools))
+	if len(tools) != 16 {
+		t.Fatalf("got %d tools, want 16", len(tools))
 	}
 	if dl := tools["download_media"]; dl == nil || dl.Annotations.ReadOnlyHint || *dl.Annotations.DestructiveHint {
 		t.Error("download_media missing or mis-annotated")
@@ -74,7 +74,7 @@ func TestToolList(t *testing.T) {
 			t.Errorf("%s missing or marked read-only", n)
 			continue
 		}
-		destructive := n == "edit_message" || n == "delete_message"
+		destructive := n == "edit_message" || n == "delete_messages"
 		if *tl.Annotations.DestructiveHint != destructive {
 			t.Errorf("%s destructiveHint = %v", n, *tl.Annotations.DestructiveHint)
 		}
@@ -103,15 +103,21 @@ func TestValidationBeforeTelegram(t *testing.T) {
 	}{
 		{"send_message", map[string]any{"chat": "me", "text": "  "}, "text is empty"},
 		{"send_message", map[string]any{"chat": "me", "text": strings.Repeat("x", 4097)}, "4096"},
-		{"reply_to_message", map[string]any{"chat": "me", "text": "hi"}, "message_id"},
-		{"delete_message", map[string]any{"chat": "me", "message_ids": []int{1, 2, 3}}, "at most 2"},
-		{"delete_message", map[string]any{"chat": "me", "message_ids": []int{}}, "empty"},
-		{"forward_message", map[string]any{"from_chat": "me", "to_chat": "me", "message_ids": []int{}}, "1 to 100"},
+		{"edit_message", map[string]any{"chat": "me", "text": "hi"}, "message_id"},
+		{"delete_messages", map[string]any{"chat": "me", "message_ids": []int{1, 2, 3}}, "at most 2"},
+		{"delete_messages", map[string]any{"chat": "me", "message_ids": []int{}}, "empty"},
+		{"forward_messages", map[string]any{"from_chat": "me", "to_chat": "me", "message_ids": []int{}}, "1 to 100"},
 		{"search_messages", map[string]any{"chat": "me", "query": ""}, "query is empty"},
 		{"download_media", map[string]any{"chat": "me", "message_id": 1, "dir": "../../etc"}, "outside allowed_roots"},
 		{"download_media", map[string]any{"chat": "me", "message_id": 1, "dir": "/etc"}, "outside allowed_roots"},
-		{"open_photo", map[string]any{"chat": "me", "message_id": 0}, "message_id is required"},
-		{"send_message", map[string]any{"chat": "me", "text": "**hi**", "parse_mode": "markdown"}, "parse_mode must be"},
+		{"view_photo", map[string]any{"chat": "me", "message_id": 0}, "message_id is required"},
+		{"send_message", map[string]any{"chat": "me", "text": "hi", "parse_mode": "rich"}, "parse_mode must be"},
+		// The limit counts the text after markup is removed.
+		{"send_message", map[string]any{"chat": "me", "parse_mode": "markdown", "text": "**" + strings.Repeat("x", 4097) + "**"}, "4096"},
+		// A numeric chat id passes the schema; the empty text is what fails.
+		{"send_message", map[string]any{"chat": -1001234567890, "text": " "}, "text is empty"},
+		{"send_message", map[string]any{"chat": 1.5, "text": "hi"}, "chat"},
+		{"send_message", map[string]any{"chat": true, "text": "hi"}, "chat"},
 		{"send_message", map[string]any{"chat": "me", "text": "<b>x</i>", "parse_mode": "html"}, "invalid HTML"},
 		{"edit_message", map[string]any{"chat": "me", "message_id": 5, "text": "<b> </b>", "parse_mode": "html"}, "text is empty"},
 		// The 4096 limit applies to the text after tags are removed.
