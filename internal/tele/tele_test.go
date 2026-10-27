@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 
@@ -223,5 +224,19 @@ func TestReplyAndTopic(t *testing.T) {
 	}
 	if topicTarget(generalTopic) != 0 || topicTarget(33) != 33 {
 		t.Error("topicTarget")
+	}
+}
+
+// gotd sets the request's flag bits from its fields when it encodes, so
+// no_webpage reaches Telegram only if Encode turns NoWebpage into flag 1.
+func TestSendRequestNoPreview(t *testing.T) {
+	for _, off := range []bool{false, true} {
+		req := sendRequest(Resolved{Input: &tg.InputPeerSelf{}}, Formatted{Text: "https://example.com"}, 0, 0, 1, off)
+		if err := req.Encode(&bin.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		if req.Flags.Has(1) != off {
+			t.Errorf("noPreview=%v: no_webpage flag = %v", off, req.Flags.Has(1))
+		}
 	}
 }

@@ -212,17 +212,22 @@ func (s *Service) Get(ctx context.Context, r Resolved, ids []int) ([]Message, er
 }
 
 // Send posts text, optionally as a reply and/or into a forum topic, and
-// returns the new message ID. randomID comes from RandomID.
-func (s *Service) Send(ctx context.Context, r Resolved, f Formatted, replyTo, topicID int, randomID int64) (int, error) {
-	req := &tg.MessagesSendMessageRequest{
-		Peer: r.Input, Message: f.Text, Entities: f.Entities, RandomID: randomID,
-		ReplyTo: replyTarget(replyTo, topicID),
-	}
+// returns the new message ID. randomID comes from RandomID; noPreview
+// sends a link in the text without its preview.
+func (s *Service) Send(ctx context.Context, r Resolved, f Formatted, replyTo, topicID int, randomID int64, noPreview bool) (int, error) {
+	req := sendRequest(r, f, replyTo, topicID, randomID, noPreview)
 	upd, err := s.API.MessagesSendMessage(ctx, req)
 	if err != nil {
 		return 0, fmt.Errorf("send message: %w", err)
 	}
 	return sentID(upd, req.RandomID), nil
+}
+
+func sendRequest(r Resolved, f Formatted, replyTo, topicID int, randomID int64, noPreview bool) *tg.MessagesSendMessageRequest {
+	return &tg.MessagesSendMessageRequest{
+		Peer: r.Input, Message: f.Text, Entities: f.Entities, RandomID: randomID,
+		ReplyTo: replyTarget(replyTo, topicID), NoWebpage: noPreview,
+	}
 }
 
 // replyAndTopic splits a reply header. In forums every message points at

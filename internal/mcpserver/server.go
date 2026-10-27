@@ -467,6 +467,9 @@ type sendMessageIn struct {
 	ReplyTo        int     `json:"reply_to,omitempty" jsonschema:"id of a message in this chat to reply to"`
 	TopicID        int     `json:"topic_id,omitempty" jsonschema:"forum topic id from list_topics"`
 	IdempotencyKey string  `json:"idempotency_key,omitempty" jsonschema:"any unique string for this message; a retry with the same key in the same chat returns the original message instead of sending it again"`
+	// Bot API names this link_preview_options.is_disabled; a plain bool
+	// keeps the default (a preview) at its zero value.
+	DisableLinkPreview bool `json:"disable_link_preview,omitempty" jsonschema:"send a link in the text without the preview Telegram adds below it; default false"`
 }
 
 func (in sendMessageIn) idempotencyKey() string { return in.IdempotencyKey }
@@ -481,7 +484,7 @@ func (s *Server) sendMessage(ctx context.Context, _ *mcp.CallToolRequest, in sen
 		return nil, sentOut{}, err
 	}
 	key := scopedKey("send_message", r.Marked, in.IdempotencyKey)
-	id, err := s.svc.Send(ctx, r, f, in.ReplyTo, in.TopicID, tele.RandomID(key, 0))
+	id, err := s.svc.Send(ctx, r, f, in.ReplyTo, in.TopicID, tele.RandomID(key, 0), in.DisableLinkPreview)
 	return s.sent("send_message", r.Marked, id, in.ReplyTo, "", err)
 }
 

@@ -141,6 +141,7 @@ tool to the next:
   says retrying will not help.
 - **Media**: `media` names the attachment kind. `link_preview` is only the
   preview of a link in the text, not a file; stickers carry `sticker_emoji`.
+  `send_message disable_link_preview=true` sends a link without a preview.
 - **Dates** are in the machine's local time zone with their UTC offset;
   `get_me` returns the current local time.
 - **Errors** say what to do next; Telegram's code stays in brackets, e.g.
