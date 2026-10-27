@@ -424,7 +424,7 @@ func (s *Service) messages(ctx context.Context, res tg.MessagesMessagesClass) ([
 			} else if !msg.Out {
 				x.FromID = x.ChatID // private chats and channel posts omit from_id
 			}
-			x.FromName = names[x.FromID]
+			x.FromName = s.senderName(ctx, names, x.FromID)
 			if h, ok := msg.ReplyTo.(*tg.MessageReplyHeader); ok {
 				x.ReplyTo, x.TopicID = replyAndTopic(h)
 			}
@@ -434,7 +434,7 @@ func (s *Service) messages(ctx context.Context, res tg.MessagesMessagesClass) ([
 				Service: strings.TrimPrefix(msg.Action.TypeName(), "messageAction")}
 			if from, ok := msg.GetFromID(); ok {
 				x.FromID = markedPeer(from)
-				x.FromName = names[x.FromID]
+				x.FromName = s.senderName(ctx, names, x.FromID)
 			}
 			out = append(out, x)
 		case *tg.MessageEmpty:
@@ -442,6 +442,22 @@ func (s *Service) messages(ctx context.Context, res tg.MessagesMessagesClass) ([
 		}
 	}
 	return out, nil
+}
+
+// senderName names a sender from the response's users and chats, or from
+// the peer cache when the response did not carry them: Telegram pushes
+// private and basic-group messages as short updates without any users,
+// which left from_name empty in get_new_messages (seen live).
+func (s *Service) senderName(ctx context.Context, names map[int64]string, marked int64) string {
+	if name, ok := names[marked]; ok || marked == 0 {
+		return name
+	}
+	kind, id := splitMarked(marked)
+	p, err := s.Peers.Get(ctx, kind, id)
+	if err != nil {
+		return "" // best effort: an unknown sender still has from_id
+	}
+	return sanitize.Name(p.Title)
 }
 
 // hiddenLinks extracts [text](url) links. Entity offsets count UTF-16
