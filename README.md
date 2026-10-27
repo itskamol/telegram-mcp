@@ -198,8 +198,10 @@ telegram-mcp watch --consumer default
 - Only chats in the consumer's `chat_ids` are announced (all watched chats
   if it has none).
 - One line per chat with new or edited messages: ids only, never message
-  text, so nothing private ends up in notifications or logs. The agent then
-  calls `get_new_messages(consumer, ack_cursor)` to read and acknowledge.
+  text, so nothing private ends up in notifications or logs. `first_id` and
+  `last_id` are Telegram message ids, not `get_new_messages` cursors, and an
+  edit is announced like a new message. The agent then calls
+  `get_new_messages(consumer, ack_cursor)` to read and acknowledge.
 - It never writes and never acknowledges; delivery guarantees stay with the
   consumer's server-side offset. Messages left unacknowledged for 5
   minutes are announced again in the same format, so an
@@ -210,7 +212,11 @@ telegram-mcp watch --consumer default
   server's WAL checkpoints are never blocked. It checks `PRAGMA
   data_version` every 500ms (about 3 µs of CPU per check) and queries only when another process committed.
 - It waits for a database or feed tables that do not exist yet, reopens
-  the file if it is replaced, and exits when its output pipe closes.
+  the file if it is replaced, and exits when its output pipe closes or on
+  Ctrl-C, `SIGTERM` or `SIGALRM`.
+- A monitor with a time limit (Claude Code's Monitor has one) ends `watch`;
+  the agent has to start it again. Nothing is missed in between: a new
+  `watch` announces every message the consumer has not acknowledged.
 
 ## Safety settings
 

@@ -54,8 +54,16 @@ Usage:
   telegram-mcp status [--account name]
   telegram-mcp logout [--account name]
   telegram-mcp install claude-desktop|claude-code [--name telegram] [--read-only] [--force]
-  telegram-mcp watch  [--consumer default] [--account name]   one JSON line per batch of new messages
+  telegram-mcp watch  [--consumer default] [--account name]   wake an agent on new messages (below)
   telegram-mcp version
+
+watch prints one JSON line per chat with new or edited messages, ids only:
+  {"chat_id":-1004325193310,"first_id":1142,"last_id":1143,"count":2}
+first_id and last_id are Telegram message ids, not get_new_messages
+cursors. watch never acknowledges anything: read and ack with
+get_new_messages for the same consumer. Messages left unacknowledged for
+5 minutes are announced again. It runs until stopped (Ctrl-C, SIGTERM or
+SIGALRM) or until its output is closed.
 
 Settings live in ~/.config/telegram-mcp/config.toml (see "status").
 The session is stored encrypted in SQLite; its key is kept in the OS keychain.
@@ -66,7 +74,9 @@ func main() {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// SIGALRM too: Go ignores it by default, and an alarm (perl -e 'alarm N;
+	// exec ...') is how macOS scripts bound a command such as watch.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGALRM)
 	defer stop()
 
 	var err error
