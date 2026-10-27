@@ -7,9 +7,12 @@ builds:
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
     ldflags: ["-s -w -X main.version={{.Version}}"]
-    # Releases target Apple Silicon only; other platforms build from source.
-    goos: [darwin]
-    goarch: [arm64]
+    # Apple Silicon Macs and Linux; other platforms build from source.
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: darwin
+        goarch: amd64
 
 archives:
   - formats: [tar.gz]

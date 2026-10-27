@@ -21,14 +21,16 @@ need curl
 need tar
 need uname
 
-# Releases ship Apple Silicon binaries only; elsewhere, build from source.
-if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
-  die "release binaries are for Apple Silicon Macs only (this is $(uname -s)/$(uname -m)).
+# Releases ship Apple Silicon Macs and Linux on amd64 or arm64; elsewhere,
+# build from source.
+case "$(uname -s)/$(uname -m)" in
+  Darwin/arm64) os=darwin arch=arm64 ;;
+  Linux/x86_64 | Linux/amd64) os=linux arch=amd64 ;;
+  Linux/aarch64 | Linux/arm64) os=linux arch=arm64 ;;
+  *) die "no release binary for $(uname -s)/$(uname -m).
 Build from source with Go 1.26+:
-  go install github.com/$REPO/cmd/$BIN@latest"
-fi
-os=darwin
-arch=arm64
+  go install github.com/$REPO/cmd/$BIN@latest" ;;
+esac
 
 if [ -z "${VERSION:-}" ]; then
   # /releases/latest redirects to /releases/tag/<tag>; no API token needed.
