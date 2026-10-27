@@ -26,11 +26,11 @@ var consumerRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
 
 type newMessagesIn struct {
 	Consumer    string `json:"consumer,omitempty" jsonschema:"name of this reader, kept by the server across sessions; default \"default\". Use one name per task, e.g. daily-digest"`
-	AckCursor   int64  `json:"ack_cursor,omitempty" jsonschema:"cursor from the previous answer, once those messages are handled; omit it and the same messages come again"`
+	AckCursor   int64  `json:"ack_cursor,omitempty" jsonschema:"cursor from the previous answer, once those messages are handled: acknowledges every message up to and including it, not the ones this call returns. Omit it and the same messages come again"`
 	Limit       int    `json:"limit,omitempty" jsonschema:"max messages, default 50, max 100"`
 	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"if nothing is new, wait up to this many seconds (max 45) for a message instead of answering empty"`
 	// A pointer: an empty list (back to all chats) differs from no list.
-	ChatIDs *[]ChatRef `json:"chat_ids,omitempty" jsonschema:"read only these chats from now on; the server remembers it for this consumer, and telegram-mcp watch --consumer announces only them. [] reads all watched chats again; omit to keep the current choice. Only chats the user set to be watched in config.toml can be chosen"`
+	ChatIDs *[]ChatRef `json:"chat_ids,omitempty" jsonschema:"a saved setting, not a filter for this call: from now on this consumer reads only these chats, and telegram-mcp watch --consumer announces only them. [] reads all watched chats again; omit to keep the current choice. Only chats the user set to be watched in config.toml can be chosen"`
 }
 
 func (s *Server) getNewMessages(ctx context.Context, _ *mcp.CallToolRequest, in newMessagesIn) (*mcp.CallToolResult, feed.Batch, error) {

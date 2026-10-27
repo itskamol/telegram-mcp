@@ -129,7 +129,8 @@ tool to the next:
 - **`idempotency_key`** on `send_message`, `send_file` and `forward_messages`:
   the key becomes Telegram's `random_id`, so a retry with the same key returns
   the message that was already sent (same `message_id`) instead of sending a
-  second copy. Timeouts of write tools say whether a retry is safe.
+  second copy. A key counts per tool and chat. Timeouts of write tools say
+  whether a retry is safe.
 - **Paging**: `list_messages` and `search_messages` return `has_more` and
   `next_offset_id` to pass back as `offset_id`.
 - **Media**: `media` names the attachment kind. `link_preview` is only the
@@ -159,18 +160,30 @@ apply with it too.
 
 - **Consumers**: the server keeps each consumer's position (`consumer`,
   default `"default"`), so a new chat session continues where the last one
-  stopped. Pass the previous answer's `cursor` as `ack_cursor` once those
-  messages are handled; without it the same batch comes again, so a session
-  that dies mid-batch loses nothing (at-least-once). `wait_seconds` (up to 45)
-  waits for the next message instead of answering empty.
+  stopped. A consumer used for the first time starts with everything still
+  buffered, up to `feed_retention_days` old. `wait_seconds` (up to 45) waits
+  for the next message instead of answering empty.
+- **Acknowledging**: pass the previous answer's `cursor` as `ack_cursor` once
+  those messages are handled. It acknowledges everything up to and including
+  that cursor, and the same call returns the next batch, which stays
+  unacknowledged until its own cursor comes back. Without `ack_cursor` the
+  same batch comes again, so a session that dies mid-batch loses nothing
+  (at-least-once). Acknowledging does not mark messages read on Telegram;
+  `mark_chat_read` does that, and senders see it.
+- **`seq` and `cursor`** are positions in the buffer, not message ids. One
+  counter runs across all buffered chats, and an edit takes a new value, so
+  a consumer sees gaps in `seq` all the time; only `gap: true` means messages
+  were lost (expired by retention before they were acknowledged).
 - **Choosing chats**: `chat_ids` narrows a consumer to some of the watched
   chats, e.g. `get_new_messages(consumer="pos", chat_ids=[-1001889276137])`.
-  The server remembers it for that consumer, so later calls and
+  It is a saved setting, not a filter for one call: the server remembers it
+  for that consumer, so later calls and
   `telegram-mcp watch --consumer pos` need not repeat it; `chat_ids=[]`
   goes back to all watched chats. It can only narrow: an agent cannot add a
   chat that `config.toml` does not watch.
-- **Edits** replace the buffered message and deliver it again; **deletes**
-  remove it. `gap: true` means unhandled messages expired by retention.
+- **Edits** replace the buffered message and deliver it again, with the same
+  `id` and `edited: true`; **deletes** remove it. `out: true` marks the
+  account's own messages.
 - **Topic filters fail closed**: a message whose forum topic cannot be told
   is not buffered.
 - **No lost updates**: gotd's update state lives in the same SQLite database

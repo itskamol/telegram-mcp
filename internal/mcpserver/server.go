@@ -111,11 +111,16 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, 
 	if fd != nil {
 		add(srv, "get_new_messages", "Get New Messages", readTelegram,
 			"Return new and edited messages of the watched chats (watch_chat_ids or watch_all in config.toml), oldest first. "+
-				"chat_ids narrows this consumer to some of them and is remembered. "+
-				"The server keeps each consumer's position across sessions. Pass the previous answer's cursor as "+
-				"ack_cursor once you have handled those messages; without it the same messages come again, so "+
-				"nothing is lost if a session ends mid-batch. wait_seconds waits for new messages. "+
-				"gap=true means older unhandled messages expired."+untrusted, s.getNewMessages)
+				"The server keeps each consumer's position across sessions; a new consumer starts with everything still "+
+				"buffered (up to feed_retention_days old), so check dates. "+
+				"Once you have handled a batch, pass its cursor as ack_cursor: that acknowledges everything up to it, and "+
+				"the call returns the next batch, unacknowledged until you pass that cursor in turn. Without ack_cursor the "+
+				"same messages come again, so nothing is lost if a session ends mid-batch. "+
+				"seq counts across all buffered chats and edits, so gaps in it are normal; use only the returned cursor, "+
+				"and only gap=true means unhandled messages expired. An edited message comes again with the same id and "+
+				"edited=true. out=true marks this account's own messages. Acknowledging does not mark anything read on "+
+				"Telegram (mark_chat_read does). chat_ids changes which chats this consumer reads from now on, not just "+
+				"this call."+untrusted, s.getNewMessages)
 	}
 	if policy.ReadOnly {
 		return srv
@@ -426,7 +431,7 @@ type sendMessageIn struct {
 	ParseMode      string  `json:"parse_mode,omitempty" jsonschema:"plain (default), markdown or html"`
 	ReplyTo        int     `json:"reply_to,omitempty" jsonschema:"id of a message in this chat to reply to"`
 	TopicID        int     `json:"topic_id,omitempty" jsonschema:"forum topic id from list_topics"`
-	IdempotencyKey string  `json:"idempotency_key,omitempty" jsonschema:"any unique string for this message; a retry with the same key returns the original message instead of sending it again"`
+	IdempotencyKey string  `json:"idempotency_key,omitempty" jsonschema:"any unique string for this message; a retry with the same key in the same chat returns the original message instead of sending it again"`
 }
 
 func (in sendMessageIn) idempotencyKey() string { return in.IdempotencyKey }

@@ -59,14 +59,14 @@ CREATE TABLE IF NOT EXISTS feed_dead_letters (
 
 // Item is one buffered message as get_new_messages returns it.
 type Item struct {
-	Seq int64 `json:"seq"`
+	Seq int64 `json:"seq" jsonschema:"position in the buffer, one counter across all chats and edits; not a message id"`
 	tele.Message
 }
 
 // Batch is one get_new_messages answer.
 type Batch struct {
 	Items   []Item `json:"messages"`
-	Cursor  int64  `json:"cursor"`
+	Cursor  int64  `json:"cursor" jsonschema:"pass as ack_cursor once these messages are handled"`
 	HasMore bool   `json:"has_more"`
 	// Gap means messages this consumer had not acknowledged were pruned
 	// by retention before it read them.
