@@ -320,3 +320,51 @@ func TestIsNoTable(t *testing.T) {
 		}
 	}
 }
+
+// stuckPipe blocks every Write until released, like a pipe whose reader
+// hangs with a full buffer.
+type stuckPipe struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *stuckPipe) Write(b []byte) (int, error) {
+	p.once.Do(func() { close(p.entered) })
+	<-p.release
+	return len(b), nil
+}
+
+func TestBlockedOutputDoesNotStarveCheckpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.db")
+	db, s := writer(t, path)
+	defer db.Close()
+	pipe := &stuckPipe{entered: make(chan struct{}), release: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	w := &Watcher{Path: path, Account: "default", Consumer: "default", Every: 20 * time.Millisecond,
+		Stale: time.Hour, Out: pipe, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	done := make(chan struct{})
+	go func() { w.Run(ctx); close(done) }()
+	defer func() { cancel(); close(pipe.release); <-done }()
+
+	time.Sleep(60 * time.Millisecond)
+	add(t, s, watched, 1, 0)
+	add(t, s, -1001889276137, 2, 0) // a second chat, so there is more to read
+	select {
+	case <-pipe.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher never wrote")
+	}
+	// The watcher is stuck writing. The server keeps writing and must be
+	// able to checkpoint the WAL back to zero meanwhile.
+	for i := range 50 {
+		add(t, s, watched, 100+i, 0)
+	}
+	var busy, logFrames, done2 int
+	if err := db.SQL.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &done2); err != nil {
+		t.Fatal(err)
+	}
+	if busy != 0 {
+		t.Fatalf("checkpoint busy=%d: the stuck watcher holds a read transaction", busy)
+	}
+}

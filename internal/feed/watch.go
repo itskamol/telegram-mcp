@@ -165,34 +165,47 @@ func (w *Watcher) announce(ctx context.Context, conn *sql.Conn, c *cursor) error
 			c.hw = 0
 		}
 	}
-	rows, err := conn.QueryContext(ctx, `
-		SELECT chat_id, MIN(message_id), MAX(message_id), COUNT(*), MAX(seq)
-		FROM feed_messages WHERE account = ? AND seq > ?
-		GROUP BY chat_id ORDER BY MIN(seq)`, w.Account, c.hw)
-	if isNoTable(err) {
-		return nil
-	}
+	notices, top, err := w.pending(ctx, conn, c.hw)
 	if err != nil {
 		return err
 	}
-	defer rows.Close() // no read transaction stays open between polls
-	top := c.hw
+	// Written only after the read transaction is closed: a stuck reader of
+	// Out would otherwise keep it open and starve the server's checkpoints.
+	for _, n := range notices {
+		if err := w.emit(n); err != nil {
+			return err
+		}
+	}
+	c.hw = top // only after every line was written
+	return nil
+}
+
+// pending reads one Notice per chat with messages after hw, and the
+// highest seq among them, in one short read transaction.
+func (w *Watcher) pending(ctx context.Context, conn *sql.Conn, hw int64) ([]Notice, int64, error) {
+	rows, err := conn.QueryContext(ctx, `
+		SELECT chat_id, MIN(message_id), MAX(message_id), COUNT(*), MAX(seq)
+		FROM feed_messages WHERE account = ? AND seq > ?
+		GROUP BY chat_id ORDER BY MIN(seq)`, w.Account, hw)
+	if isNoTable(err) {
+		return nil, hw, nil
+	}
+	if err != nil {
+		return nil, hw, err
+	}
+	defer rows.Close()
+	var out []Notice
+	top := hw
 	for rows.Next() {
 		var n Notice
 		var maxSeq int64
 		if err := rows.Scan(&n.ChatID, &n.FirstID, &n.LastID, &n.Count, &maxSeq); err != nil {
-			return err
+			return nil, hw, err
 		}
-		if err := w.emit(n); err != nil {
-			return err
-		}
+		out = append(out, n)
 		top = max(top, maxSeq)
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	c.hw = top
-	return nil
+	return out, top, rows.Err()
 }
 
 // restale rolls the high-water mark back to the consumer's offset when
