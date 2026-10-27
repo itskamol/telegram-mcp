@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tgerr"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/itskamol/telegram-mcp-go/internal/audit"
+	"github.com/itskamol/telegram-mcp-go/internal/feed"
+	"github.com/itskamol/telegram-mcp-go/internal/storage"
 	"github.com/itskamol/telegram-mcp-go/internal/tele"
 )
 
@@ -160,5 +164,51 @@ func TestIDListsAreTypedArrays(t *testing.T) {
 		if ty := s.Properties["message_ids"]["type"]; ty != "array" {
 			t.Errorf("%s.message_ids type = %v, want array", tool, ty)
 		}
+	}
+}
+
+func TestOwnDeletesLeaveTheBuffer(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(filepath.Join(t.TempDir(), "f.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := feed.NewStore(ctx, db, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const group = -1001889276137
+	now := int(time.Now().Unix())
+	for _, m := range []struct {
+		kind string
+		chat int64
+		id   int
+	}{{storage.KindChannel, group, 187}, {storage.KindChannel, group, 188}, {storage.KindUser, 5, 187}} {
+		if _, err := store.Upsert(ctx, m.kind, 0, tele.Message{ChatID: m.chat, ID: m.id}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notify := feed.NewNotifier()
+	ready := notify.Ready()
+	s := &Server{feed: &Feed{Store: store, Notify: notify}}
+	if err := s.forgetDeleted(ctx, tele.Resolved{Kind: storage.KindChannel, Marked: group}, []int{187}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := store.Fetch(ctx, "c", 0, 10)
+	left := map[string]bool{}
+	for _, it := range b.Items {
+		left[fmt.Sprintf("%d/%d", it.ChatID, it.ID)] = true
+	}
+	if left[fmt.Sprintf("%d/187", group)] || !left[fmt.Sprintf("%d/188", group)] || !left["5/187"] {
+		t.Fatalf("after deleting %d/187: %v", group, left)
+	}
+	select {
+	case <-ready:
+	default:
+		t.Error("waiters not woken by the delete")
+	}
+	if err := (&Server{}).forgetDeleted(ctx, tele.Resolved{}, []int{1}); err != nil {
+		t.Error("no feed should be a no-op")
 	}
 }

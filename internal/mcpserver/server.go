@@ -24,6 +24,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/itskamol/telegram-mcp-go/internal/audit"
+	"github.com/itskamol/telegram-mcp-go/internal/storage"
 	"github.com/itskamol/telegram-mcp-go/internal/tele"
 )
 
@@ -546,7 +547,31 @@ func (s *Server) deleteMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 	if err := s.record(audit.Entry{Tool: "delete_messages", ChatID: r.Marked, IDs: in.MessageIDs}, err); err != nil {
 		return nil, okOut{}, err
 	}
+	if err := s.forgetDeleted(ctx, r, in.MessageIDs); err != nil {
+		return nil, okOut{}, fmt.Errorf("deleted on Telegram, but the watch buffer still holds them: %w", err)
+	}
 	return nil, okOut{OK: true}, nil
+}
+
+// forgetDeleted drops messages this account deleted from the watch
+// buffer. Telegram does not push a delete update back to the session that
+// deleted: it answers with messages.affectedMessages, which only moves
+// pts, so the buffer would keep them otherwise (seen in a live test).
+func (s *Server) forgetDeleted(ctx context.Context, r tele.Resolved, ids []int) error {
+	if s.feed == nil {
+		return nil
+	}
+	var changed bool
+	var err error
+	if r.Kind == storage.KindChannel {
+		changed, err = s.feed.Store.DeleteChannel(ctx, r.Marked, ids)
+	} else {
+		changed, err = s.feed.Store.DeleteNonChannel(ctx, ids)
+	}
+	if changed {
+		s.feed.Notify.Publish()
+	}
+	return err
 }
 
 type chatIn struct {
