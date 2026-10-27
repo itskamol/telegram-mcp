@@ -63,7 +63,7 @@ func TestRelayedSessions(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dir := shortDir(t)
-	path := SocketPath(dir, "default", false)
+	path := SocketPath(dir, "default", "1.0", false)
 
 	ln, err := Listen(path)
 	if err != nil {
@@ -98,7 +98,7 @@ func TestReadOnlySocketIsSeparate(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dir := shortDir(t)
-	full, ro := SocketPath(dir, "default", false), SocketPath(dir, "default", true)
+	full, ro := SocketPath(dir, "default", "1.0", false), SocketPath(dir, "default", "1.0", true)
 	if full == ro {
 		t.Fatal("read-only and full share a socket")
 	}
@@ -125,7 +125,7 @@ func TestReadOnlySocketIsSeparate(t *testing.T) {
 }
 
 func TestRelayWithoutPrimary(t *testing.T) {
-	path := SocketPath(shortDir(t), "work", false)
+	path := SocketPath(shortDir(t), "work", "1.0", false)
 	start := time.Now()
 	err := Relay(context.Background(), path, strings.NewReader(""), io.Discard, 300*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "different --account") {
@@ -137,7 +137,7 @@ func TestRelayWithoutPrimary(t *testing.T) {
 }
 
 func TestListenReplacesStaleSocketAndChecksLength(t *testing.T) {
-	path := SocketPath(shortDir(t), "default", false)
+	path := SocketPath(shortDir(t), "default", "1.0", false)
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -150,5 +150,30 @@ func TestListenReplacesStaleSocketAndChecksLength(t *testing.T) {
 	long := filepath.Join("/tmp", strings.Repeat("x", 120), "serve-default.sock")
 	if _, err := Listen(long); err == nil || !strings.Contains(err.Error(), "longer than") {
 		t.Fatalf("long path: %v", err)
+	}
+}
+
+func TestRelayReportsVersionMismatch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := shortDir(t)
+	ln, err := Listen(SocketPath(dir, "default", "0.2.3", false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	defer func() { cancel(); wg.Wait() }()
+	wg.Go(func() { Serve(ctx, ln, newServer("old"), slog.Default()) })
+
+	err = Relay(ctx, SocketPath(dir, "default", "0.3.0", false), strings.NewReader(""), io.Discard, 300*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "different telegram-mcp version (0.2.3)") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestSocketPathVersionIsSafe(t *testing.T) {
+	p := SocketPath("/d", "default", "v1.2.3+dirty/../x", false)
+	if filepath.Dir(p) != "/d" || strings.Count(filepath.Base(p), "/") != 0 {
+		t.Fatalf("version escaped the directory: %s", p)
 	}
 }

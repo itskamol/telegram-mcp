@@ -120,9 +120,9 @@ tool to the next:
   Markup is parsed locally, so broken markup fails before anything is sent,
   and the length limits apply to the text after markup is removed.
 - **`idempotency_key`** on `send_message`, `send_file` and `forward_messages`:
-  retrying with the same key cannot send twice (Telegram rejects the repeated
-  `random_id`), and the tool then answers `already_sent: true`. Timeouts of
-  write tools say whether a retry is safe.
+  the key becomes Telegram's `random_id`, so a retry with the same key returns
+  the message that was already sent (same `message_id`) instead of sending a
+  second copy. Timeouts of write tools say whether a retry is safe.
 - **Paging**: `list_messages` and `search_messages` return `has_more` and
   `next_offset_id` to pass back as `offset_id`.
 - **Dates** are in the machine's local time zone with their UTC offset;

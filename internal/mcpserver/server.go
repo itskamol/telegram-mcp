@@ -388,8 +388,9 @@ func (s *Server) listTopics(ctx context.Context, _ *mcp.CallToolRequest, in list
 type sentOut struct {
 	ChatID    int64 `json:"chat_id"`
 	MessageID int   `json:"message_id,omitempty"`
-	// AlreadySent means an earlier call with the same idempotency_key
-	// went through; nothing was sent this time.
+	// AlreadySent is set when Telegram refused a repeated idempotency_key
+	// with an error instead of returning the original message; nothing
+	// was sent this time.
 	AlreadySent bool `json:"already_sent,omitempty"`
 }
 
@@ -399,7 +400,7 @@ type sendMessageIn struct {
 	ParseMode      string  `json:"parse_mode,omitempty" jsonschema:"plain (default), markdown or html"`
 	ReplyTo        int     `json:"reply_to,omitempty" jsonschema:"id of a message in this chat to reply to"`
 	TopicID        int     `json:"topic_id,omitempty" jsonschema:"forum topic id from list_topics"`
-	IdempotencyKey string  `json:"idempotency_key,omitempty" jsonschema:"any unique string for this message; retrying with the same key never sends twice"`
+	IdempotencyKey string  `json:"idempotency_key,omitempty" jsonschema:"any unique string for this message; a retry with the same key returns the original message instead of sending it again"`
 }
 
 func (in sendMessageIn) idempotencyKey() string { return in.IdempotencyKey }
@@ -447,7 +448,7 @@ type forwardMessagesIn struct {
 	FromChat       ChatRef `json:"from_chat" jsonschema:"chat the messages are in: id (number or string), @username, or me"`
 	MessageIDs     []int   `json:"message_ids" jsonschema:"ids of the messages to forward (1 to 100), from list_messages of from_chat"`
 	ToChat         ChatRef `json:"to_chat" jsonschema:"chat to forward them to: id (number or string), @username, or me"`
-	IdempotencyKey string  `json:"idempotency_key,omitempty" jsonschema:"any unique string for this forward; retrying with the same key never forwards twice"`
+	IdempotencyKey string  `json:"idempotency_key,omitempty" jsonschema:"any unique string for this forward; a retry with the same key returns the original forward instead of forwarding again"`
 }
 
 func (in forwardMessagesIn) idempotencyKey() string { return in.IdempotencyKey }

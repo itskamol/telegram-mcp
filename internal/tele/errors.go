@@ -58,15 +58,17 @@ func Explain(err error) error {
 }
 
 // IsDuplicate reports whether Telegram rejected a send because its
-// random_id, derived from an idempotency key, was already used.
+// random_id was already used. Telegram usually returns the original
+// message instead; this covers the methods that answer with an error.
 func IsDuplicate(err error) bool {
 	return tgerr.Is(err, "RANDOM_ID_DUPLICATE")
 }
 
 // RandomID returns the random_id for a send. With an idempotency key it
-// is derived from the key, so retrying with the same key reuses it and
-// Telegram rejects the duplicate instead of sending the message twice.
-// Without one it is random. index separates the messages of one forward.
+// is derived from the key, so a retry with the same key reuses it, and
+// Telegram answers with the message it already sent instead of sending a
+// second one (verified live for sendMessage and forwardMessages). Without
+// a key it is random. index separates the messages of one forward.
 func RandomID(key string, index int) int64 {
 	if key == "" {
 		return randomID()
@@ -79,7 +81,7 @@ func RandomID(key string, index int) int64 {
 // may have reached Telegram even though no answer came back.
 func TimeoutAdvice(key string) string {
 	if key != "" {
-		return "it may still have gone through; retrying with the same idempotency_key is safe"
+		return "it may still have gone through; retrying with the same idempotency_key is safe and returns the original message"
 	}
 	return "it may still have gone through; check list_messages before retrying, " +
 		"or pass an idempotency_key next time so a retry cannot send twice"

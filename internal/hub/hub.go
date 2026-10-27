@@ -19,6 +19,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -30,15 +31,44 @@ import (
 // Linux allows 108, so the smaller one is used everywhere.
 const maxSocketPath = 103
 
-// SocketPath is the socket for one account and mode. Read-only and full
-// access listen separately so that a process started with --read-only can
-// never reach the write tools through the primary.
-func SocketPath(dataDir, account string, readOnly bool) string {
-	name := "serve-" + account
+// SocketPath is the socket for one account, binary version and mode.
+//
+// Read-only and full access listen separately so that a process started
+// with --read-only can never reach the write tools through the primary.
+// The version is part of the name so that a relay never serves another
+// version's tools: after an upgrade, a new relay must not silently hand
+// the client the old primary's tool set.
+func SocketPath(dataDir, account, version string, readOnly bool) string {
+	name := "serve-" + account + "-v" + safeVersion(version)
 	if readOnly {
 		name += ".ro"
 	}
 	return filepath.Join(dataDir, name+".sock")
+}
+
+func safeVersion(v string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' {
+			return r
+		}
+		return '_'
+	}, v)
+}
+
+// otherVersions lists versions with a socket for account other than path's.
+func otherVersions(path string) []string {
+	dir, base := filepath.Split(path)
+	account, _, _ := strings.Cut(strings.TrimPrefix(base, "serve-"), "-v")
+	matches, _ := filepath.Glob(filepath.Join(dir, "serve-"+account+"-v*.sock"))
+	var out []string
+	for _, m := range matches {
+		if m == path || strings.HasSuffix(m, ".ro.sock") {
+			continue
+		}
+		v := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(m), "serve-"+account+"-v"), ".sock")
+		out = append(out, v)
+	}
+	return out
 }
 
 // Listen replaces a stale socket at path and listens on it, owner-only.
@@ -145,6 +175,11 @@ func dial(ctx context.Context, path string, wait time.Duration) (net.Conn, error
 			return nil, fmt.Errorf("connect to running server: %w", err)
 		}
 		if time.Now().After(deadline) {
+			if vs := otherVersions(path); len(vs) > 0 {
+				return nil, fmt.Errorf("a different telegram-mcp version (%s) is serving this profile; "+
+					"restart the MCP client (e.g. quit and reopen Claude Desktop) so all its processes run the same version",
+					strings.Join(vs, ", "))
+			}
 			return nil, fmt.Errorf("another telegram-mcp process holds this profile but serves no socket at %s "+
 				"(is it running for a different --account, or not as `serve`?)", path)
 		}

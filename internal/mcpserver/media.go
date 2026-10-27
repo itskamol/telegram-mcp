@@ -136,7 +136,7 @@ type sendFileIn struct {
 	AsDocument     bool    `json:"as_document,omitempty" jsonschema:"send images as files instead of compressed photos"`
 	ReplyTo        int     `json:"reply_to,omitempty" jsonschema:"id of a message in this chat to reply to"`
 	TopicID        int     `json:"topic_id,omitempty" jsonschema:"forum topic id from list_topics"`
-	IdempotencyKey string  `json:"idempotency_key,omitempty" jsonschema:"any unique string for this file; retrying with the same key never sends twice"`
+	IdempotencyKey string  `json:"idempotency_key,omitempty" jsonschema:"any unique string for this file; a retry with the same key returns the original message instead of sending it again"`
 }
 
 func (in sendFileIn) idempotencyKey() string { return in.IdempotencyKey }

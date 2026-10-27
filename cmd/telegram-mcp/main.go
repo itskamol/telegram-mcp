@@ -177,7 +177,7 @@ func runServe(ctx context.Context, args []string) error {
 	if errors.Is(err, storage.ErrLocked) {
 		// Another serve owns the Telegram connection: share it.
 		ro := *readOnly || e.cfg.ReadOnly
-		return hub.Relay(ctx, hub.SocketPath(e.paths.DataDir, e.account, ro), os.Stdin, os.Stdout, 30*time.Second)
+		return hub.Relay(ctx, hub.SocketPath(e.paths.DataDir, e.account, version, ro), os.Stdin, os.Stdout, 30*time.Second)
 	}
 	if err != nil {
 		return err
@@ -235,7 +235,7 @@ func runServe(ctx context.Context, args []string) error {
 			}()
 			log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 			for ro, srv := range map[bool]*mcp.Server{false: full, true: readOnlySrv} {
-				ln, err := hub.Listen(hub.SocketPath(e.paths.DataDir, e.account, ro))
+				ln, err := hub.Listen(hub.SocketPath(e.paths.DataDir, e.account, version, ro))
 				if err != nil {
 					return fmt.Errorf("listen for other processes: %w", err)
 				}
