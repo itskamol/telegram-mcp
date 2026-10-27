@@ -271,6 +271,24 @@ func TestFeedToolsInReadOnly(t *testing.T) {
 	}
 }
 
+// Telegram never marks a Saved Messages message as out (seen live), so an
+// agent reading and writing there would answer itself. The feed tools must
+// say so where an agent picks a direction.
+func TestFeedToolsWarnAboutSavedMessages(t *testing.T) {
+	tools := toolNames(t, connectFeed(t, Policy{MaxDelete: 20}, newFeed(t)))
+	if d := tools["get_new_messages"].Description; !strings.Contains(d, "Saved Messages") {
+		t.Errorf("get_new_messages does not mention Saved Messages: %q", d)
+	}
+	b, _ := json.Marshal(tools["set_feed_filter"].InputSchema)
+	var s struct {
+		Properties map[string]struct{ Description string }
+	}
+	_ = json.Unmarshal(b, &s)
+	if d := s.Properties["direction"].Description; !strings.Contains(d, "Saved Messages") {
+		t.Errorf("set_feed_filter direction does not mention Saved Messages: %q", d)
+	}
+}
+
 func TestFeedFilterContract(t *testing.T) {
 	cs := connectFeed(t, Policy{MaxDelete: 20}, newFeed(t))
 	call := func(tool string, args map[string]any) (map[string]any, string) {

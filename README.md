@@ -186,6 +186,11 @@ apply with it too.
   some of the watched chats (`[]` goes back to all of them); `direction` is
   `in` (messages to the account), `out` (its own) or `both` (the default),
   e.g. `set_feed_filter(consumer="pos", chat_ids=[-1001889276137], direction="in")`.
+  The direction follows Telegram's `out` flag, which Telegram never sets in
+  Saved Messages (seen live, in history and in updates): there every
+  message counts as `in`, the agent's own replies included. An agent that
+  both reads and writes Saved Messages must skip the ids `send_message`
+  returned to it.
   The filter is saved for that consumer, so later calls and
   `telegram-mcp watch --consumer pos` follow it, and every
   `get_new_messages` answer shows it under `filter`. A field left out keeps
@@ -200,9 +205,10 @@ apply with it too.
   the direction.
 - **Edits** replace the buffered message and deliver it again, with the same
   `id` and `edited: true`; **deletes** remove it. `out: true` marks the
-  account's own messages. A message this server sends with `send_message`
-  into a private chat can be missing: Telegram answers that call with the
-  new id only, not the message.
+  account's own messages, except in Saved Messages (see above). A message
+  this server sends with `send_message` into another private chat can be
+  missing: Telegram answers that call with the new id only, not the
+  message. In Saved Messages they do arrive.
 - **Topic filters fail closed**: a message whose forum topic cannot be told
   is not buffered.
 - **No lost updates**: gotd's update state lives in the same SQLite database

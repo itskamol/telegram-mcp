@@ -83,7 +83,7 @@ type feedFilterIn struct {
 	Consumer string `json:"consumer,omitempty" jsonschema:"consumer to set, as named in get_new_messages; default \"default\""`
 	// A pointer: an empty list (back to all chats) differs from no list.
 	ChatIDs   *[]ChatRef `json:"chat_ids,omitempty" jsonschema:"read only these chats; [] reads every watched chat again; omit to keep the current list. Only chats the user set to be watched in config.toml can be chosen"`
-	Direction string     `json:"direction,omitempty" jsonschema:"in (messages to this account), out (its own messages) or both; omit to keep the current one"`
+	Direction string     `json:"direction,omitempty" jsonschema:"in (messages to this account; in Saved Messages Telegram marks none as out, so every message there is in), out (its own messages) or both; omit to keep the current one"`
 }
 
 type feedFilterOut struct {

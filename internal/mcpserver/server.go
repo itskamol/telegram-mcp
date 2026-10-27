@@ -121,8 +121,9 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, 
 				"same messages come again, so nothing is lost if a session ends mid-batch. "+
 				"seq counts across all buffered chats and edits, so gaps in it are normal; use only the returned cursor, "+
 				"and only gap=true means unhandled messages expired. An edited message comes again with the same id and "+
-				"edited=true. out=true marks this account's own messages; ones this server sent with send_message may be "+
-				"missing. set_feed_filter chooses which chats and directions a consumer reads; each answer shows its filter. "+
+				"edited=true. out=true marks this account's own messages, except in Saved Messages, where Telegram marks none: "+
+				"an agent that writes there reads its own replies as new. Messages this server sent with send_message to "+
+				"other private chats may be missing. set_feed_filter chooses which chats and directions a consumer reads; each answer shows its filter. "+
 				"Acknowledging does not mark anything read on Telegram (mark_chat_read does)."+untrusted, s.getNewMessages)
 		add(srv, "set_feed_filter", "Set Feed Filter", writeLocal,
 			"Choose what a get_new_messages consumer reads: chat_ids (some of the watched chats, [] for all) and direction "+
