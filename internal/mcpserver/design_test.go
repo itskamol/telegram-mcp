@@ -327,3 +327,19 @@ func TestFeedFilterContract(t *testing.T) {
 		t.Fatalf("read back: %v", out)
 	}
 }
+
+// A client can keep tool definitions from an older server for the rest of
+// a session (seen in Claude Code after an upgrade and a reconnect). get_me's
+// description names the version it came from and its answer the version
+// that runs, so an agent can tell that its tool list is stale.
+func TestGetMeExposesVersion(t *testing.T) {
+	desc := toolNames(t, connect(t, Policy{MaxDelete: 20}))["get_me"].Description
+	if !strings.Contains(desc, "telegram-mcp test") || !strings.Contains(desc, "stale") {
+		t.Errorf("get_me description lacks its version or the stale-list advice: %q", desc)
+	}
+	s := &Server{svc: &tele.Service{SelfID: 1, Me: tele.Me{Name: "K"}}, version: "9.9.9"}
+	_, out, err := s.getMe(context.Background(), nil, noInput{})
+	if err != nil || out.Version != "9.9.9" {
+		t.Errorf("get_me answer: %+v %v", out, err)
+	}
+}

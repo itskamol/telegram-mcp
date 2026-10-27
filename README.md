@@ -144,6 +144,10 @@ tool to the next:
   `send_message disable_link_preview=true` sends a link without a preview.
 - **Dates** are in the machine's local time zone with their UTC offset;
   `get_me` returns the current local time.
+- **Stale tool lists**: a client can keep an older server's tool
+  definitions for the rest of a session, even after a reconnect (seen in
+  Claude Code). `get_me`'s description names the version it came from and
+  its answer the version that runs; when they differ, start a new session.
 - **Errors** say what to do next; Telegram's code stays in brackets, e.g.
   `only messages sent by this account can be edited [MESSAGE_AUTHOR_REQUIRED]`.
 

@@ -56,10 +56,11 @@ func (p Policy) allows(marked int64) bool {
 
 // Server holds what the tool handlers share.
 type Server struct {
-	svc    *tele.Service
-	policy Policy
-	audit  *audit.Log
-	feed   *Feed
+	svc     *tele.Service
+	policy  Policy
+	audit   *audit.Log
+	feed    *Feed
+	version string
 }
 
 // access is what a tool may change; it sets the MCP annotations.
@@ -75,12 +76,18 @@ const (
 // New builds the MCP server and registers the tools the policy permits.
 // fd enables get_new_messages; pass nil when no chat is watched.
 func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, fd *Feed) *mcp.Server {
-	s := &Server{svc: svc, policy: policy, audit: auditLog, feed: fd}
+	s := &Server{svc: svc, policy: policy, audit: auditLog, feed: fd, version: version}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "telegram-mcp", Version: version}, nil)
 	roots := strings.Join(policy.AllowedRoots, ", ")
 
+	// A client may keep an older server's tool definitions for the rest of a
+	// session (seen in Claude Code after an upgrade and a reconnect), so this
+	// description carries its version and the answer the running one.
 	add(srv, "get_me", "Get Me", readTelegram,
-		"Return the logged-in account (id, name, username) and the current local time; message dates use the same time zone.", s.getMe)
+		"Return the logged-in account (id, name, username), the current local time and the running server version; "+
+			"message dates use the same time zone. These tool definitions come from telegram-mcp "+version+": if the "+
+			"answer's version differs, the tool list in this session is stale and may lack parameters the server has. "+
+			"Tell the user; a new session loads the current list, a reconnect may not.", s.getMe)
 	add(srv, "list_chats", "List Chats", readTelegram,
 		"List chats (private, groups, channels), most recent first, with ids, unread counts and is_contact "+
 			"(true for users in your contacts, false for everyone and everything else). "+
@@ -267,6 +274,7 @@ type meOut struct {
 	Name     string `json:"name"`
 	Username string `json:"username,omitempty"`
 	Now      string `json:"now" jsonschema:"current local time with UTC offset"`
+	Version  string `json:"version" jsonschema:"version of the running telegram-mcp server"`
 }
 
 func (s *Server) getMe(ctx context.Context, _ *mcp.CallToolRequest, _ noInput) (*mcp.CallToolResult, meOut, error) {
@@ -274,7 +282,8 @@ func (s *Server) getMe(ctx context.Context, _ *mcp.CallToolRequest, _ noInput) (
 	if err != nil {
 		return nil, meOut{}, err
 	}
-	return nil, meOut{ID: s.svc.SelfID, Name: me.Name, Username: me.Username, Now: time.Now().Format(time.RFC3339)}, nil
+	return nil, meOut{ID: s.svc.SelfID, Name: me.Name, Username: me.Username, Now: time.Now().Format(time.RFC3339),
+		Version: s.version}, nil
 }
 
 type listChatsIn struct {
