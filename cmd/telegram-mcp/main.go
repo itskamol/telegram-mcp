@@ -58,9 +58,9 @@ Usage:
   telegram-mcp version
 
 watch prints one JSON line per chat with new or edited messages, ids only:
-  {"chat_id":-1004325193310,"first_id":1142,"last_id":1143,"count":2}
+  {"chat_id":-1004325193310,"first_id":1142,"last_id":1143,"count":2,"edits":1}
 first_id and last_id are Telegram message ids, not get_new_messages
-cursors. watch never acknowledges anything: read and ack with
+cursors; edits says how many of count are edits of earlier messages. watch never acknowledges anything: read and ack with
 get_new_messages for the same consumer. Messages left unacknowledged for
 5 minutes are announced again. It runs until stopped (Ctrl-C, SIGTERM or
 SIGALRM) or until its output is closed.

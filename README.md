@@ -236,7 +236,7 @@ telegram-mcp watch --consumer default
 ```
 
 ```json
-{"chat_id":-1004325193310,"first_id":1142,"last_id":1143,"count":2}
+{"chat_id":-1004325193310,"first_id":1142,"last_id":1143,"count":2,"edits":1}
 ```
 
 - Only messages the consumer's filter lets through are announced: its
@@ -244,8 +244,9 @@ telegram-mcp watch --consumer default
   consumer set to `in` is not woken by the account's own messages.
 - One line per chat with new or edited messages: ids only, never message
   text, so nothing private ends up in notifications or logs. `first_id` and
-  `last_id` are Telegram message ids, not `get_new_messages` cursors, and an
-  edit is announced like a new message. The agent then calls
+  `last_id` are Telegram message ids, not `get_new_messages` cursors. An
+  edit is announced like a new message; `edits` says how many of `count`
+  are edits, so a batch with `edits` equal to `count` holds nothing new. The agent then calls
   `get_new_messages(consumer, ack_cursor)` to read and acknowledge.
 - It never writes and never acknowledges; delivery guarantees stay with the
   consumer's server-side offset. Messages left unacknowledged for 5

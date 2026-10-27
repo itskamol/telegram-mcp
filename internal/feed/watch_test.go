@@ -445,3 +445,20 @@ func TestWatchReadsDatabasesWithoutDirection(t *testing.T) {
 		t.Fatalf("notices %+v", got)
 	}
 }
+
+// An edit is announced like a new message; edits says how many of count
+// are edits, so an agent can tell an edit-only batch from new messages.
+func TestWatchCountsEdits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "w.db")
+	db, s := writer(t, path)
+	defer db.Close()
+	r := startWatch(t, path, "c", time.Hour)
+	time.Sleep(100 * time.Millisecond)
+	add(t, s, watched, 1, 0)
+	r.out.waitFor(t, 1)
+	add(t, s, watched, 1, 100) // the same message, edited
+	got := r.out.waitFor(t, 2)
+	if got[0].Count != 1 || got[0].Edits != 0 || got[1].Count != 1 || got[1].Edits != 1 {
+		t.Fatalf("notices %+v, want a new message, then one edit", got)
+	}
+}

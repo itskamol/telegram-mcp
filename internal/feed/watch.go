@@ -25,6 +25,9 @@ type Notice struct {
 	FirstID int   `json:"first_id"`
 	LastID  int   `json:"last_id"`
 	Count   int   `json:"count"`
+	// Edits counts the messages of Count that are edited versions; an
+	// edit is announced like a new message.
+	Edits int `json:"edits"`
 }
 
 // Watcher prints a Notice line whenever the buffer gains messages. It is
@@ -195,7 +198,7 @@ func (w *Watcher) pending(ctx context.Context, conn *sql.Conn, hw int64, cs cons
 		args = append(args, cs.direction, cs.direction)
 	}
 	rows, err := conn.QueryContext(ctx, `
-		SELECT chat_id, MIN(message_id), MAX(message_id), COUNT(*), MAX(seq)
+		SELECT chat_id, MIN(message_id), MAX(message_id), COUNT(*), SUM(edit_date > 0), MAX(seq)
 		FROM feed_messages WHERE account = ? AND seq > ? AND `+where+`
 		GROUP BY chat_id ORDER BY MIN(seq)`, args...)
 	if isNoTable(err) {
@@ -210,7 +213,7 @@ func (w *Watcher) pending(ctx context.Context, conn *sql.Conn, hw int64, cs cons
 	for rows.Next() {
 		var n Notice
 		var maxSeq int64
-		if err := rows.Scan(&n.ChatID, &n.FirstID, &n.LastID, &n.Count, &maxSeq); err != nil {
+		if err := rows.Scan(&n.ChatID, &n.FirstID, &n.LastID, &n.Count, &n.Edits, &maxSeq); err != nil {
 			return nil, hw, err
 		}
 		out = append(out, n)
@@ -296,7 +299,7 @@ type writeError struct{ err error }
 func (e writeError) Error() string { return e.err.Error() }
 
 // emit writes one line in a single Write: on a pipe, writes up to
-// PIPE_BUF (512 bytes on macOS) are atomic, and a Notice is under 100.
+// PIPE_BUF (512 bytes on macOS) are atomic, and a Notice is under 110.
 func (w *Watcher) emit(n Notice) error {
 	line, err := json.Marshal(n)
 	if err != nil {
