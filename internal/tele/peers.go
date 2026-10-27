@@ -108,12 +108,12 @@ func (s *Service) resolveID(ctx context.Context, marked int64) (Resolved, error)
 	if kind == storage.KindUser && id == s.SelfID {
 		return Resolved{Input: &tg.InputPeerSelf{}, Marked: marked, Kind: kind, Plain: id, Title: "Saved Messages"}, nil
 	}
-	p, err := s.Peers.Get(ctx, kind, id)
+	p, err := s.lookup(ctx, kind, id)
 	if errors.Is(err, storage.ErrPeerNotCached) {
 		if _, err := s.Dialogs(ctx, 200, ""); err != nil {
 			return Resolved{}, err
 		}
-		p, err = s.Peers.Get(ctx, kind, id)
+		p, err = s.lookup(ctx, kind, id)
 	}
 	if errors.Is(err, storage.ErrPeerNotCached) {
 		return Resolved{}, fmt.Errorf("chat %d not found: it is not among your recent chats; "+
@@ -123,6 +123,23 @@ func (s *Service) resolveID(ctx context.Context, marked int64) (Resolved, error)
 		return Resolved{}, err
 	}
 	return toResolved(p), nil
+}
+
+// lookup finds a cached peer. A positive id that is no known user is
+// also tried as a channel or basic group: people and other tools often
+// quote a group's id without Bot API's -100 prefix (1889276137 for
+// -1001889276137), and a user wins when both exist.
+func (s *Service) lookup(ctx context.Context, kind string, id int64) (storage.Peer, error) {
+	p, err := s.Peers.Get(ctx, kind, id)
+	if kind != storage.KindUser || !errors.Is(err, storage.ErrPeerNotCached) {
+		return p, err
+	}
+	for _, k := range []string{storage.KindChannel, storage.KindChat} {
+		if p, err := s.Peers.Get(ctx, k, id); !errors.Is(err, storage.ErrPeerNotCached) {
+			return p, err
+		}
+	}
+	return storage.Peer{}, storage.ErrPeerNotCached
 }
 
 // ResolveUsername asks Telegram (the cache only short-circuits repeat calls).

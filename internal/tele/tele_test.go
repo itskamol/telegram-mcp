@@ -200,3 +200,28 @@ func TestHiddenLinks(t *testing.T) {
 		t.Errorf("webpage kind = %q", got)
 	}
 }
+
+func TestReplyAndTopic(t *testing.T) {
+	cases := []struct {
+		h              tg.MessageReplyHeader
+		reply, topicID int
+	}{
+		{tg.MessageReplyHeader{ReplyToMsgID: 5}, 5, 0},                                        // plain reply
+		{tg.MessageReplyHeader{ForumTopic: true, ReplyToMsgID: 33}, 0, 33},                    // message in topic 33
+		{tg.MessageReplyHeader{ForumTopic: true, ReplyToMsgID: 40, ReplyToTopID: 33}, 40, 33}, // reply inside topic 33
+	}
+	for _, c := range cases {
+		if r, tp := replyAndTopic(&c.h); r != c.reply || tp != c.topicID {
+			t.Errorf("%+v: got reply %d topic %d", c.h, r, tp)
+		}
+	}
+	if replyTarget(0, generalTopic) != nil {
+		t.Error("General topic sent as a reply target")
+	}
+	if r, ok := replyTarget(7, generalTopic).(*tg.InputReplyToMessage); !ok || r.ReplyToMsgID != 7 || r.TopMsgID != 0 {
+		t.Errorf("reply in General: %+v", r)
+	}
+	if topicTarget(generalTopic) != 0 || topicTarget(33) != 33 {
+		t.Error("topicTarget")
+	}
+}

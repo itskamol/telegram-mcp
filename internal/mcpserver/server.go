@@ -88,7 +88,7 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string) 
 			"Before writing to a person, prefer an is_contact match or confirm with the user."+untrusted, s.searchContacts)
 	add(srv, "list_messages", "List Messages", readTelegram,
 		"List a chat's messages, newest first. When has_more is true, call again with offset_id = next_offset_id for older ones. "+
-			"topic_id limits the list to one forum topic."+untrusted, s.listMessages)
+			"In forums each message carries its topic_id; pass topic_id to list one topic (1 is General)."+untrusted, s.listMessages)
 	add(srv, "search_messages", "Search Messages", readTelegram,
 		"Search one chat's messages for text, newest first. Page with offset_id = next_offset_id while has_more is true."+untrusted, s.searchMessages)
 	add(srv, "list_topics", "List Topics", readTelegram,
@@ -112,7 +112,7 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string) 
 		"Send a local file as a photo or document, with an optional caption. Only files inside "+roots+
 			" can be sent (a relative path is inside the first); hidden files are refused.", s.sendFile)
 	add(srv, "forward_messages", "Forward Messages", writeAdd,
-		"Forward messages (ids from list_messages of from_chat) to another chat.", s.forwardMessages)
+		"Forward messages (ids from list_messages of from_chat) to another chat, or into one of its forum topics with topic_id.", s.forwardMessages)
 	add(srv, "edit_message", "Edit Message", writeChange,
 		"Replace the text of a message this account sent. parse_mode as in send_message.", s.editMessage)
 	add(srv, "delete_messages", "Delete Messages", writeChange,
@@ -449,6 +449,7 @@ type forwardMessagesIn struct {
 	FromChat       ChatRef `json:"from_chat" jsonschema:"chat the messages are in: id (number or string), @username, or me"`
 	MessageIDs     []int   `json:"message_ids" jsonschema:"ids of the messages to forward (1 to 100), from list_messages of from_chat"`
 	ToChat         ChatRef `json:"to_chat" jsonschema:"chat to forward them to: id (number or string), @username, or me"`
+	TopicID        int     `json:"topic_id,omitempty" jsonschema:"forum topic of to_chat to forward into, from list_topics"`
 	IdempotencyKey string  `json:"idempotency_key,omitempty" jsonschema:"any unique string for this forward; a retry with the same key returns the original forward instead of forwarding again"`
 }
 
@@ -473,7 +474,7 @@ func (s *Server) forwardMessages(ctx context.Context, _ *mcp.CallToolRequest, in
 		return nil, forwardOut{}, err
 	}
 	key := scopedKey(fmt.Sprintf("forward_messages\x00%d", from.Marked), to.Marked, in.IdempotencyKey)
-	ids, err := s.svc.Forward(ctx, from, in.MessageIDs, to, key)
+	ids, err := s.svc.Forward(ctx, from, in.MessageIDs, to, in.TopicID, key)
 	out := forwardOut{ToChatID: to.Marked, MessageIDs: orEmpty(ids)}
 	if tele.IsDuplicate(err) {
 		out.AlreadySent, err = true, nil

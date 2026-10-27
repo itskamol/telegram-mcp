@@ -44,10 +44,13 @@ type Message struct {
 	Out      bool   `json:"out,omitempty"`
 	Text     string `json:"text,omitempty"`
 	ReplyTo  int    `json:"reply_to,omitempty"`
-	Media    string `json:"media,omitempty"`
-	Edited   bool   `json:"edited,omitempty"`
-	Forward  bool   `json:"forwarded,omitempty"`
-	Service  string `json:"service,omitempty"`
+	// TopicID is the forum topic the message is in; ReplyTo is then only
+	// set for a real reply inside the topic.
+	TopicID int    `json:"topic_id,omitempty"`
+	Media   string `json:"media,omitempty"`
+	Edited  bool   `json:"edited,omitempty"`
+	Forward bool   `json:"forwarded,omitempty"`
+	Service string `json:"service,omitempty"`
 	// Links lists hyperlinks whose target is hidden behind other text
 	// ([text](url)); plain URLs are already visible in Text.
 	Links []Link `json:"links,omitempty"`
@@ -216,8 +219,29 @@ func (s *Service) Send(ctx context.Context, r Resolved, f Formatted, replyTo, to
 	return sentID(upd, req.RandomID), nil
 }
 
+// replyAndTopic splits a reply header. In forums every message points at
+// its topic's first message, which is not a reply: only a header naming
+// both a topic (ReplyToTopID) and a message is one.
+func replyAndTopic(h *tg.MessageReplyHeader) (replyTo, topicID int) {
+	switch {
+	case !h.ForumTopic:
+		return h.ReplyToMsgID, 0
+	case h.ReplyToTopID != 0:
+		return h.ReplyToMsgID, h.ReplyToTopID
+	default:
+		return 0, h.ReplyToMsgID
+	}
+}
+
+// generalTopic is the id of a forum's General topic, which is where
+// messages without a topic go; it must not be sent as a reply target.
+const generalTopic = 1
+
 // replyTarget builds reply_to for a reply and/or a forum topic; nil if neither.
 func replyTarget(replyTo, topicID int) tg.InputReplyToClass {
+	if topicID == generalTopic {
+		topicID = 0
+	}
 	switch {
 	case replyTo != 0 && topicID != 0:
 		return &tg.InputReplyToMessage{ReplyToMsgID: replyTo, TopMsgID: topicID}
@@ -230,15 +254,17 @@ func replyTarget(replyTo, topicID int) tg.InputReplyToClass {
 	return nil
 }
 
-// Forward copies messages from one chat to another and returns the new
-// IDs. With an idempotency key a retry cannot forward them twice.
-func (s *Service) Forward(ctx context.Context, from Resolved, ids []int, to Resolved, key string) ([]int, error) {
+// Forward copies messages from one chat to another, into topicID when it
+// is a forum topic, and returns the new IDs. With an idempotency key a
+// retry returns the first forward instead of forwarding again.
+func (s *Service) Forward(ctx context.Context, from Resolved, ids []int, to Resolved, topicID int, key string) ([]int, error) {
 	rnd := make([]int64, len(ids))
 	for i := range rnd {
 		rnd[i] = RandomID(key, i)
 	}
 	upd, err := s.API.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{
 		FromPeer: from.Input, ID: ids, RandomID: rnd, ToPeer: to.Input,
+		TopMsgID: topicTarget(topicID),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("forward: %w", err)
@@ -250,6 +276,14 @@ func (s *Service) Forward(ctx context.Context, from Resolved, ids []int, to Reso
 		}
 	}
 	return out, nil
+}
+
+// topicTarget is the top_msg_id for a topic; 0 for none or General.
+func topicTarget(topicID int) int {
+	if topicID == generalTopic {
+		return 0
+	}
+	return topicID
 }
 
 // Edit replaces a message's text.
@@ -350,7 +384,7 @@ func (s *Service) messages(ctx context.Context, res tg.MessagesMessagesClass) ([
 			}
 			x.FromName = names[x.FromID]
 			if h, ok := msg.ReplyTo.(*tg.MessageReplyHeader); ok {
-				x.ReplyTo = h.ReplyToMsgID
+				x.ReplyTo, x.TopicID = replyAndTopic(h)
 			}
 			out = append(out, x)
 		case *tg.MessageService:
