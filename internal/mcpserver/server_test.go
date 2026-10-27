@@ -17,6 +17,12 @@ import (
 // tests only cover what happens before any Telegram call.
 func connect(t *testing.T, p Policy) *mcp.ClientSession {
 	t.Helper()
+	return connectFeed(t, p, nil)
+}
+
+// connectFeed is connect with a watch buffer, which adds the feed tools.
+func connectFeed(t *testing.T, p Policy, fd *Feed) *mcp.ClientSession {
+	t.Helper()
 	ctx := context.Background()
 	log, err := audit.Open(filepath.Join(t.TempDir(), "audit.log"), "test")
 	if err != nil {
@@ -25,7 +31,7 @@ func connect(t *testing.T, p Policy) *mcp.ClientSession {
 	t.Cleanup(func() { _ = log.Close() })
 
 	st, ct := mcp.NewInMemoryTransports()
-	srv := New(nil, p, log, "test", nil)
+	srv := New(nil, p, log, "test", fd)
 	if _, err := srv.Connect(ctx, st, nil); err != nil {
 		t.Fatal(err)
 	}

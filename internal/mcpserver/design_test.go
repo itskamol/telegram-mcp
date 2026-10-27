@@ -229,16 +229,83 @@ func TestOwnDeletesLeaveTheBuffer(t *testing.T) {
 }
 
 func TestFeedChatIDsIsTypedArray(t *testing.T) {
-	b, _ := json.Marshal(inputSchema[newMessagesIn]())
-	var s struct {
-		Properties map[string]struct {
-			Type  any
-			Items struct{ Type any }
+	for _, schema := range []any{inputSchema[newMessagesIn](), inputSchema[feedFilterIn]()} {
+		b, _ := json.Marshal(schema)
+		var s struct {
+			Properties map[string]struct {
+				Type  any
+				Items struct{ Type any }
+			}
+		}
+		_ = json.Unmarshal(b, &s)
+		p := s.Properties["chat_ids"]
+		if p.Type != "array" || fmt.Sprint(p.Items.Type) != "[integer string]" {
+			t.Fatalf("chat_ids schema: %s", b)
 		}
 	}
-	_ = json.Unmarshal(b, &s)
-	p := s.Properties["chat_ids"]
-	if p.Type != "array" || fmt.Sprint(p.Items.Type) != "[integer string]" {
-		t.Fatalf("chat_ids schema: %s", b)
+}
+
+func newFeed(t *testing.T) *Feed {
+	t.Helper()
+	db, err := storage.Open(filepath.Join(t.TempDir(), "f.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	store, err := feed.NewStore(context.Background(), db, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Feed{Store: store, Notify: feed.NewNotifier()}
+}
+
+// set_feed_filter only writes the local buffer's consumer table, like
+// download_media writes local disk, so read-only mode keeps it.
+func TestFeedToolsInReadOnly(t *testing.T) {
+	tools := toolNames(t, connectFeed(t, Policy{ReadOnly: true, MaxDelete: 20}, newFeed(t)))
+	if tl := tools["get_new_messages"]; tl == nil || !tl.Annotations.ReadOnlyHint {
+		t.Error("get_new_messages missing or not read-only")
+	}
+	if tl := tools["set_feed_filter"]; tl == nil || tl.Annotations.ReadOnlyHint || *tl.Annotations.DestructiveHint {
+		t.Error("set_feed_filter missing or mis-annotated")
+	}
+}
+
+func TestFeedFilterContract(t *testing.T) {
+	cs := connectFeed(t, Policy{MaxDelete: 20}, newFeed(t))
+	call := func(tool string, args map[string]any) (map[string]any, string) {
+		t.Helper()
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tool, Arguments: args})
+		if err != nil {
+			t.Fatalf("%s: %v", tool, err)
+		}
+		text := res.Content[0].(*mcp.TextContent).Text
+		if res.IsError {
+			return nil, text
+		}
+		var out map[string]any
+		if err := json.Unmarshal([]byte(text), &out); err != nil {
+			t.Fatalf("%s: %v in %s", tool, err, text)
+		}
+		return out, ""
+	}
+
+	// A bad direction fails before any chat is resolved (there is no
+	// Telegram service here: resolving would panic).
+	if _, errText := call("set_feed_filter", map[string]any{"chat_ids": []any{"@someone"}, "direction": "incoming"}); !strings.Contains(errText, "direction must be") {
+		t.Fatalf("bad direction: %q", errText)
+	}
+	out, _ := call("set_feed_filter", map[string]any{"consumer": "bot", "direction": "in"})
+	if out["direction"] != "in" || fmt.Sprint(out["chat_ids"]) != "[]" || out["consumer"] != "bot" {
+		t.Fatalf("set: %v", out)
+	}
+	// The deprecated chat_ids of get_new_messages changes the chats only.
+	out, _ = call("get_new_messages", map[string]any{"consumer": "bot", "chat_ids": []any{}})
+	if f := out["filter"].(map[string]any); f["direction"] != "in" {
+		t.Fatalf("deprecated chat_ids reset the direction: %v", f)
+	}
+	// Only a consumer: the current filter, unchanged.
+	if out, _ = call("set_feed_filter", map[string]any{"consumer": "bot"}); out["direction"] != "in" {
+		t.Fatalf("read back: %v", out)
 	}
 }

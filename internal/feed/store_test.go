@@ -184,7 +184,7 @@ func TestConsumerChats(t *testing.T) {
 	put(t, s, storage.KindChannel, msg(other, 2, 0, "b"))
 	put(t, s, storage.KindChannel, msg(group, 3, 0, "c"))
 
-	if err := s.SetChats(ctx, "pos", []int64{group}); err != nil {
+	if _, _, err := s.SetFilter(ctx, "pos", &[]int64{group}, ""); err != nil {
 		t.Fatal(err)
 	}
 	b, err := s.Fetch(ctx, "pos", 0, 10)
@@ -201,7 +201,7 @@ func TestConsumerChats(t *testing.T) {
 		t.Fatalf("unfiltered consumer saw %d", len(all.Items))
 	}
 	// Back to all chats: nothing before the acknowledged offset returns.
-	if err := s.SetChats(ctx, "pos", nil); err != nil {
+	if _, _, err := s.SetFilter(ctx, "pos", &[]int64{}, ""); err != nil {
 		t.Fatal(err)
 	}
 	put(t, s, storage.KindChannel, msg(other, 4, 0, "d"))
@@ -238,5 +238,85 @@ func TestStoreAddsChatIDsToOldConsumers(t *testing.T) {
 	}
 	if committed != 7 || chats != "" {
 		t.Fatalf("migrated consumer: committed %d, chat_ids %q", committed, chats)
+	}
+}
+
+func TestConsumerDirection(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	own := msg(group, 2, 0, "own")
+	own.Out = true
+	put(t, s, storage.KindChannel, msg(group, 1, 0, "in"))
+	put(t, s, storage.KindChannel, own)
+	put(t, s, storage.KindChannel, msg(group, 3, 0, "in"))
+
+	f, _, err := s.SetFilter(ctx, "bot", nil, DirectionIn)
+	if err != nil || f.Direction != DirectionIn || len(f.ChatIDs) != 0 {
+		t.Fatalf("set direction: %+v %v", f, err)
+	}
+	b, err := s.Fetch(ctx, "bot", 0, 10)
+	if err != nil || len(b.Items) != 2 || b.Items[0].ID != 1 || b.Items[1].ID != 3 || b.Filter.Direction != DirectionIn {
+		t.Fatalf("incoming batch: %+v %v", b, err)
+	}
+	// Changing the chats keeps the direction, and the other way round.
+	if f, _, _ = s.SetFilter(ctx, "bot", &[]int64{group}, ""); f.Direction != DirectionIn {
+		t.Fatalf("chat change reset direction: %+v", f)
+	}
+	f, committed, err := s.SetFilter(ctx, "bot", nil, DirectionBoth)
+	if err != nil || len(f.ChatIDs) != 1 || committed != 0 {
+		t.Fatalf("direction change: %+v %d %v", f, committed, err)
+	}
+	// Widening applies after the acknowledged offset only: the own message
+	// skipped before cursor 3 does not come back; a new one does.
+	b, _ = s.Fetch(ctx, "bot", b.Cursor, 10)
+	if len(b.Items) != 0 {
+		t.Fatalf("acknowledged messages came back: %+v", b.Items)
+	}
+	own.ID = 4
+	put(t, s, storage.KindChannel, own)
+	if b, _ = s.Fetch(ctx, "bot", 0, 10); len(b.Items) != 1 || b.Items[0].ID != 4 || !b.Items[0].Out {
+		t.Fatalf("after widening: %+v", b.Items)
+	}
+	if _, _, err := s.SetFilter(ctx, "bot", nil, "incoming"); err == nil {
+		t.Error("unknown direction accepted")
+	}
+}
+
+func TestStoreFillsOutForOldMessages(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(filepath.Join(t.TempDir(), "old.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// The table as v0.6.0 created it, with an own and an incoming message.
+	if _, err := db.SQL.Exec(`CREATE TABLE feed_messages (
+		account TEXT NOT NULL, chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, peer_kind TEXT NOT NULL,
+		topic_id INTEGER NOT NULL DEFAULT 0, date_unix INTEGER NOT NULL, edit_date INTEGER NOT NULL DEFAULT 0,
+		seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (account, chat_id, message_id));
+		INSERT INTO feed_messages VALUES ('default', 5, 1, 'user', 0, 0, 0, 1, '{"id":1,"out":true}');
+		INSERT INTO feed_messages VALUES ('default', 5, 2, 'user', 0, 0, 0, 2, '{"id":2}')`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // and again, on the next start
+		if _, err := NewStore(ctx, db, "default"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := db.SQL.Query(`SELECT message_id, out FROM feed_messages ORDER BY message_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[int]int{}
+	for rows.Next() {
+		var id, out int
+		if err := rows.Scan(&id, &out); err != nil {
+			t.Fatal(err)
+		}
+		got[id] = out
+	}
+	if got[1] != 1 || got[2] != 0 {
+		t.Fatalf("out after migration: %v", got)
 	}
 }

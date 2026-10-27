@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS feed_messages (
 	edit_date   INTEGER NOT NULL DEFAULT 0,
 	seq         INTEGER NOT NULL,
 	body        TEXT    NOT NULL,
+	out         INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (account, chat_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS feed_messages_seq ON feed_messages (account, seq);
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS feed_consumers (
 	committed INTEGER NOT NULL DEFAULT 0,
 	delivered INTEGER NOT NULL DEFAULT 0,
 	chat_ids  TEXT    NOT NULL DEFAULT '',
+	direction TEXT    NOT NULL DEFAULT 'both',
 	PRIMARY KEY (account, name)
 );
 CREATE TABLE IF NOT EXISTS feed_dead_letters (
@@ -63,6 +65,20 @@ type Item struct {
 	tele.Message
 }
 
+// Directions a consumer can read: messages to this account, its own
+// messages, or both.
+const (
+	DirectionIn   = "in"
+	DirectionOut  = "out"
+	DirectionBoth = "both"
+)
+
+// Filter is what a consumer reads of the buffer.
+type Filter struct {
+	ChatIDs   []int64 `json:"chat_ids" jsonschema:"chats this consumer reads; empty means every watched chat"`
+	Direction string  `json:"direction" jsonschema:"in (messages to this account), out (its own) or both"`
+}
+
 // Batch is one get_new_messages answer.
 type Batch struct {
 	Items   []Item `json:"messages"`
@@ -70,7 +86,8 @@ type Batch struct {
 	HasMore bool   `json:"has_more"`
 	// Gap means messages this consumer had not acknowledged were pruned
 	// by retention before it read them.
-	Gap bool `json:"gap,omitempty"`
+	Gap    bool   `json:"gap,omitempty"`
+	Filter Filter `json:"filter" jsonschema:"what this consumer reads, as set with set_feed_filter"`
 }
 
 // Store is the per-account buffer.
@@ -82,24 +99,54 @@ type Store struct {
 // ErrAckAhead means an ack_cursor larger than anything delivered.
 var ErrAckAhead = errors.New("ack_cursor was never delivered to this consumer; pass the cursor of the previous answer")
 
+// added lists columns that older versions did not create, with the
+// statement that fills them in for existing rows.
+var added = []struct{ table, column, ddl, fill string }{
+	{"feed_consumers", "chat_ids", `ALTER TABLE feed_consumers ADD COLUMN chat_ids TEXT NOT NULL DEFAULT ''`, ""},
+	// Bodies hold out as a JSON boolean that is left out when false:
+	// json_extract reads true as 1 and a missing field as NULL.
+	{"feed_messages", "out", `ALTER TABLE feed_messages ADD COLUMN out INTEGER NOT NULL DEFAULT 0`,
+		`UPDATE feed_messages SET out = COALESCE(json_extract(body, '$.out'), 0)`},
+	// After out: watch takes a direction column as proof that out exists.
+	{"feed_consumers", "direction", `ALTER TABLE feed_consumers ADD COLUMN direction TEXT NOT NULL DEFAULT 'both'`, ""},
+}
+
 // NewStore creates the tables if needed and adds columns that older
 // versions did not have.
 func NewStore(ctx context.Context, db *storage.DB, account string) (*Store, error) {
 	if _, err := db.SQL.ExecContext(ctx, schema); err != nil {
 		return nil, fmt.Errorf("feed schema: %w", err)
 	}
-	var has bool
-	if err := db.SQL.QueryRowContext(ctx,
-		`SELECT COUNT(*) > 0 FROM pragma_table_info('feed_consumers') WHERE name = 'chat_ids'`).Scan(&has); err != nil {
-		return nil, fmt.Errorf("feed schema: %w", err)
-	}
-	if !has {
-		if _, err := db.SQL.ExecContext(ctx,
-			`ALTER TABLE feed_consumers ADD COLUMN chat_ids TEXT NOT NULL DEFAULT ''`); err != nil {
-			return nil, fmt.Errorf("feed schema: %w", err)
+	for _, c := range added {
+		if err := addColumn(ctx, db, c.table, c.column, c.ddl, c.fill); err != nil {
+			return nil, fmt.Errorf("feed schema: add %s.%s: %w", c.table, c.column, err)
 		}
 	}
 	return &Store{db: db, account: account}, nil
+}
+
+// addColumn adds and fills a column in one transaction, so a crash can
+// never leave the column added but unfilled.
+func addColumn(ctx context.Context, db *storage.DB, table, column, ddl, fill string) error {
+	tx, err := db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	var has bool
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) > 0 FROM pragma_table_info(?) WHERE name = ?`,
+		table, column).Scan(&has); err != nil || has {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, ddl); err != nil {
+		return err
+	}
+	if fill != "" {
+		if _, err := tx.ExecContext(ctx, fill); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // inChats is the SQL condition for a consumer's chat filter, stored as a
@@ -107,23 +154,84 @@ func NewStore(ctx context.Context, db *storage.DB, account string) (*Store, erro
 // filter twice.
 const inChats = `(? = '' OR chat_id IN (SELECT value FROM json_each(?)))`
 
-// SetChats replaces the chats a consumer reads; none means all buffered
-// chats. It applies from the consumer's current offset: messages it has
-// not acknowledged yet in a newly added chat are delivered too.
-func (s *Store) SetChats(ctx context.Context, consumer string, chats []int64) error {
-	filter := ""
-	if len(chats) > 0 {
-		b, err := json.Marshal(chats)
-		if err != nil {
-			return err
-		}
-		filter = string(b)
+// inDirection is the SQL condition for a consumer's direction. It takes
+// the direction twice.
+const inDirection = `(? = 'both' OR out = (? = 'out'))`
+
+// SetFilter changes what a consumer reads and returns the result with the
+// consumer's acknowledged offset. A nil chats or an empty direction leaves
+// that part as it is; an empty chats list means every buffered chat.
+//
+// A new filter applies after the acknowledged offset only: messages not
+// acknowledged yet are delivered under it, acknowledged ones never come
+// back, even if the filter skipped them. One offset serves every chat and
+// direction, so bringing those back would mean delivering everything
+// after them again.
+func (s *Store) SetFilter(ctx context.Context, consumer string, chats *[]int64, direction string) (Filter, int64, error) {
+	if err := CheckDirection(direction); err != nil {
+		return Filter{}, 0, err
 	}
-	_, err := s.db.SQL.ExecContext(ctx, `
-		INSERT INTO feed_consumers (account, name, chat_ids) VALUES (?, ?, ?)
-		ON CONFLICT (account, name) DO UPDATE SET chat_ids = excluded.chat_ids`,
-		s.account, consumer, filter)
-	return err
+	tx, err := s.db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return Filter{}, 0, err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO feed_consumers (account, name) VALUES (?, ?)`,
+		s.account, consumer); err != nil {
+		return Filter{}, 0, err
+	}
+	if chats != nil {
+		list := ""
+		if len(*chats) > 0 {
+			b, err := json.Marshal(*chats)
+			if err != nil {
+				return Filter{}, 0, err
+			}
+			list = string(b)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE feed_consumers SET chat_ids = ? WHERE account = ? AND name = ?`,
+			list, s.account, consumer); err != nil {
+			return Filter{}, 0, err
+		}
+	}
+	if direction != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE feed_consumers SET direction = ? WHERE account = ? AND name = ?`,
+			direction, s.account, consumer); err != nil {
+			return Filter{}, 0, err
+		}
+	}
+	var committed int64
+	var list, dir string
+	if err := tx.QueryRowContext(ctx, `SELECT committed, chat_ids, direction FROM feed_consumers WHERE account = ? AND name = ?`,
+		s.account, consumer).Scan(&committed, &list, &dir); err != nil {
+		return Filter{}, 0, err
+	}
+	f, err := filterOf(list, dir)
+	if err != nil {
+		return Filter{}, 0, err
+	}
+	return f, committed, tx.Commit()
+}
+
+// CheckDirection accepts a direction, or "" for "leave it as it is".
+func CheckDirection(d string) error {
+	switch d {
+	case "", DirectionIn, DirectionOut, DirectionBoth:
+		return nil
+	}
+	return fmt.Errorf("direction must be %s, %s or %s", DirectionIn, DirectionOut, DirectionBoth)
+}
+
+// filterOf decodes a consumer's stored chat list and direction.
+func filterOf(chats, direction string) (Filter, error) {
+	f := Filter{ChatIDs: []int64{}, Direction: direction}
+	if chats == "" {
+		return f, nil
+	}
+	if err := json.Unmarshal([]byte(chats), &f.ChatIDs); err != nil {
+		return Filter{}, fmt.Errorf("consumer chat_ids: %w", err)
+	}
+	return f, nil
 }
 
 // Upsert stores a new message or a newer edit of one and reports whether
@@ -146,12 +254,12 @@ func (s *Store) Upsert(ctx context.Context, peerKind string, topicID int, m tele
 	}
 	next++
 	res, err := tx.ExecContext(ctx, `
-		INSERT INTO feed_messages (account, chat_id, message_id, peer_kind, topic_id, date_unix, edit_date, seq, body)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO feed_messages (account, chat_id, message_id, peer_kind, topic_id, date_unix, edit_date, seq, body, out)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (account, chat_id, message_id) DO UPDATE
 			SET body = excluded.body, edit_date = excluded.edit_date, seq = excluded.seq
 			WHERE excluded.edit_date > feed_messages.edit_date`,
-		s.account, m.ChatID, m.ID, peerKind, topicID, dateUnix, m.EditDate, next, string(body))
+		s.account, m.ChatID, m.ID, peerKind, topicID, dateUnix, m.EditDate, next, string(body), m.Out)
 	if err != nil {
 		return false, err
 	}
@@ -219,10 +327,14 @@ func (s *Store) Fetch(ctx context.Context, consumer string, ack int64, limit int
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
 	var committed, delivered, pruned int64
-	var filter string
-	err = tx.QueryRowContext(ctx, `SELECT committed, delivered, chat_ids FROM feed_consumers WHERE account = ? AND name = ?`,
-		s.account, consumer).Scan(&committed, &delivered, &filter)
+	chats, direction := "", DirectionBoth
+	err = tx.QueryRowContext(ctx, `SELECT committed, delivered, chat_ids, direction FROM feed_consumers WHERE account = ? AND name = ?`,
+		s.account, consumer).Scan(&committed, &delivered, &chats, &direction)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Batch{}, err
+	}
+	filter, err := filterOf(chats, direction)
+	if err != nil {
 		return Batch{}, err
 	}
 	if ack > delivered {
@@ -235,12 +347,13 @@ func (s *Store) Fetch(ctx context.Context, consumer string, ack int64, limit int
 	}
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT seq, body FROM feed_messages WHERE account = ? AND seq > ? AND `+inChats+` ORDER BY seq LIMIT ?`,
-		s.account, committed, filter, filter, limit+1)
+		SELECT seq, body FROM feed_messages WHERE account = ? AND seq > ? AND `+inChats+` AND `+inDirection+`
+		ORDER BY seq LIMIT ?`,
+		s.account, committed, chats, chats, direction, direction, limit+1)
 	if err != nil {
 		return Batch{}, err
 	}
-	b := Batch{Cursor: committed, Gap: committed < pruned}
+	b := Batch{Cursor: committed, Gap: committed < pruned, Filter: filter}
 	for rows.Next() {
 		var it Item
 		var body string

@@ -107,7 +107,7 @@ claude mcp add telegram -- telegram-mcp serve
 | `list_topics` | `download_media` (local disk only) |
 | `get_media_info` | |
 | `view_photo` | |
-| `get_new_messages` (with `watch_chat_ids` or `watch_all`) | |
+| `get_new_messages` (with `watch_chat_ids` or `watch_all`) | `set_feed_filter` (local consumer settings) |
 
 Conventions the tools share, so a model can carry what it learned from one
 tool to the next:
@@ -174,16 +174,28 @@ apply with it too.
   counter runs across all buffered chats, and an edit takes a new value, so
   a consumer sees gaps in `seq` all the time; only `gap: true` means messages
   were lost (expired by retention before they were acknowledged).
-- **Choosing chats**: `chat_ids` narrows a consumer to some of the watched
-  chats, e.g. `get_new_messages(consumer="pos", chat_ids=[-1001889276137])`.
-  It is a saved setting, not a filter for one call: the server remembers it
-  for that consumer, so later calls and
-  `telegram-mcp watch --consumer pos` need not repeat it; `chat_ids=[]`
-  goes back to all watched chats. It can only narrow: an agent cannot add a
-  chat that `config.toml` does not watch.
+- **Filters**: `set_feed_filter` sets what a consumer reads, and
+  `get_new_messages` only reads and acknowledges. `chat_ids` narrows it to
+  some of the watched chats (`[]` goes back to all of them); `direction` is
+  `in` (messages to the account), `out` (its own) or `both` (the default),
+  e.g. `set_feed_filter(consumer="pos", chat_ids=[-1001889276137], direction="in")`.
+  The filter is saved for that consumer, so later calls and
+  `telegram-mcp watch --consumer pos` follow it, and every
+  `get_new_messages` answer shows it under `filter`. A field left out keeps
+  its value. Filters only narrow: an agent cannot add a chat that
+  `config.toml` does not watch.
+- **A filter change applies after the acknowledged cursor.** One cursor
+  serves all chats and both directions, so messages the old filter skipped
+  before it never come back; `list_messages` still has them.
+- **`chat_ids` on `get_new_messages`** is deprecated and stays for one
+  release, for sessions that still hold the old tool list. It does what
+  `set_feed_filter(chat_ids=…)` does: it replaces the saved chats and keeps
+  the direction.
 - **Edits** replace the buffered message and deliver it again, with the same
   `id` and `edited: true`; **deletes** remove it. `out: true` marks the
-  account's own messages.
+  account's own messages. A message this server sends with `send_message`
+  into a private chat can be missing: Telegram answers that call with the
+  new id only, not the message.
 - **Topic filters fail closed**: a message whose forum topic cannot be told
   is not buffered.
 - **No lost updates**: gotd's update state lives in the same SQLite database
@@ -208,8 +220,9 @@ telegram-mcp watch --consumer default
 {"chat_id":-1004325193310,"first_id":1142,"last_id":1143,"count":2}
 ```
 
-- Only chats in the consumer's `chat_ids` are announced (all watched chats
-  if it has none).
+- Only messages the consumer's filter lets through are announced: its
+  `chat_ids` (all watched chats if it has none) and `direction`, so a
+  consumer set to `in` is not woken by the account's own messages.
 - One line per chat with new or edited messages: ids only, never message
   text, so nothing private ends up in notifications or logs. `first_id` and
   `last_id` are Telegram message ids, not `get_new_messages` cursors, and an
@@ -236,7 +249,7 @@ telegram-mcp watch --consumer default
 All optional, in `config.toml`:
 
 ```toml
-read_only = true                         # register only the read tools (also: serve --read-only)
+read_only = true                         # no tool that changes Telegram (also: serve --read-only)
 allowed_chat_ids = [123456789, -1001234567890]  # restrict every tool to these chats
 max_delete = 20                          # message IDs per delete_messages call
 allowed_roots = ["~/Downloads/telegram-mcp"]  # where download_media may write (this is the default)
@@ -244,6 +257,10 @@ max_download_mb = 50                     # per file
 max_upload_mb = 50                       # per send_file file
 ```
 
+- `read_only` removes every tool that changes Telegram. Tools that write
+  only locally stay: `download_media` (files in `allowed_roots`),
+  `get_new_messages` acknowledgements and `set_feed_filter` (consumer
+  positions and filters in the local database).
 - Text from Telegram is returned as JSON with invisible and control characters
   stripped, and tool descriptions tell the model not to follow instructions in it.
 - Outside channels Telegram deletes by message ID alone, with no chat attached.
@@ -265,7 +282,7 @@ max_upload_mb = 50                       # per send_file file
   grant the permission or move `allowed_roots` elsewhere.
 - Flood waits up to a minute are absorbed; each tool call times out after 55 s.
 - Only the user decides what is buffered (`watch_chat_ids`, `watch_all`);
-  `get_new_messages chat_ids` can narrow that, never widen it. Login codes
+  `set_feed_filter` can narrow that, never widen it. Login codes
   from Telegram's `777000` are never buffered, even with `watch_all`.
 
 ## Where files live

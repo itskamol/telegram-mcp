@@ -139,11 +139,12 @@ func (w *Watcher) follow(ctx context.Context) error {
 // about new messages; on a file created or replaced since, everything in
 // it is new, so it starts from zero.
 func (w *Watcher) start(ctx context.Context, conn *sql.Conn, original bool) (cursor, error) {
-	committed, _, found, err := w.consumer(ctx, conn)
+	cs, err := w.consumer(ctx, conn)
 	if err != nil {
 		return cursor{}, err
 	}
-	if !found && original {
+	committed := cs.committed
+	if !cs.found && original {
 		if committed, err = w.counter(ctx, conn); err != nil {
 			return cursor{}, err
 		}
@@ -165,11 +166,11 @@ func (w *Watcher) announce(ctx context.Context, conn *sql.Conn, c *cursor) error
 			c.hw = 0
 		}
 	}
-	_, filter, _, err := w.consumer(ctx, conn)
+	cs, err := w.consumer(ctx, conn)
 	if err != nil {
 		return err
 	}
-	notices, top, err := w.pending(ctx, conn, c.hw, filter)
+	notices, top, err := w.pending(ctx, conn, c.hw, cs)
 	if err != nil {
 		return err
 	}
@@ -184,14 +185,19 @@ func (w *Watcher) announce(ctx context.Context, conn *sql.Conn, c *cursor) error
 	return nil
 }
 
-// pending reads one Notice per chat with messages after hw in the
-// consumer's chats, and the highest seq among them, in one short read
-// transaction.
-func (w *Watcher) pending(ctx context.Context, conn *sql.Conn, hw int64, filter string) ([]Notice, int64, error) {
+// pending reads one Notice per chat with messages after hw that the
+// consumer's filter lets through, and the highest seq among them, in one
+// short read transaction.
+func (w *Watcher) pending(ctx context.Context, conn *sql.Conn, hw int64, cs consumerState) ([]Notice, int64, error) {
+	where, args := inChats, []any{w.Account, hw, cs.chats, cs.chats}
+	if cs.directed {
+		where += ` AND ` + inDirection
+		args = append(args, cs.direction, cs.direction)
+	}
 	rows, err := conn.QueryContext(ctx, `
 		SELECT chat_id, MIN(message_id), MAX(message_id), COUNT(*), MAX(seq)
-		FROM feed_messages WHERE account = ? AND seq > ? AND `+inChats+`
-		GROUP BY chat_id ORDER BY MIN(seq)`, w.Account, hw, filter, filter)
+		FROM feed_messages WHERE account = ? AND seq > ? AND `+where+`
+		GROUP BY chat_id ORDER BY MIN(seq)`, args...)
 	if isNoTable(err) {
 		return nil, hw, nil
 	}
@@ -217,11 +223,12 @@ func (w *Watcher) pending(ctx context.Context, conn *sql.Conn, hw int64, filter 
 // announced messages stay unacknowledged for Stale, so they are announced
 // again in the same Notice format.
 func (w *Watcher) restale(ctx context.Context, conn *sql.Conn, c *cursor) error {
-	committed, _, found, err := w.consumer(ctx, conn)
+	cs, err := w.consumer(ctx, conn)
 	if err != nil {
 		return err
 	}
-	if !found {
+	committed := cs.committed
+	if !cs.found {
 		committed = c.floor
 	}
 	committed = max(committed, c.floor)
@@ -239,23 +246,39 @@ func (w *Watcher) restale(ctx context.Context, conn *sql.Conn, c *cursor) error 
 	return nil
 }
 
-// consumer reads the consumer's acknowledged offset and chat filter. A
-// server older than the chat_ids column has no filter.
-func (w *Watcher) consumer(ctx context.Context, conn *sql.Conn) (committed int64, filter string, found bool, err error) {
-	err = conn.QueryRowContext(ctx, `SELECT committed, chat_ids FROM feed_consumers WHERE account = ? AND name = ?`,
-		w.Account, w.Consumer).Scan(&committed, &filter)
+// consumerState is a consumer's acknowledged offset and filter.
+type consumerState struct {
+	committed int64
+	chats     string // JSON array of chat ids; '' means every chat
+	direction string
+	found     bool
+	// directed is false on a database of a server older than the
+	// direction column, which has no feed_messages.out to filter on.
+	directed bool
+}
+
+// consumer reads the consumer's acknowledged offset and filter. A server
+// older than the chat_ids or direction column has no such filter.
+func (w *Watcher) consumer(ctx context.Context, conn *sql.Conn) (consumerState, error) {
+	cs := consumerState{direction: DirectionBoth, directed: true}
+	const q = `FROM feed_consumers WHERE account = ? AND name = ?`
+	err := conn.QueryRowContext(ctx, `SELECT committed, chat_ids, direction `+q, w.Account, w.Consumer).
+		Scan(&cs.committed, &cs.chats, &cs.direction)
 	if isNoColumn(err) {
-		filter = ""
-		err = conn.QueryRowContext(ctx, `SELECT committed FROM feed_consumers WHERE account = ? AND name = ?`,
-			w.Account, w.Consumer).Scan(&committed)
+		cs.directed = false
+		err = conn.QueryRowContext(ctx, `SELECT committed, chat_ids `+q, w.Account, w.Consumer).Scan(&cs.committed, &cs.chats)
+	}
+	if isNoColumn(err) {
+		err = conn.QueryRowContext(ctx, `SELECT committed `+q, w.Account, w.Consumer).Scan(&cs.committed)
 	}
 	switch {
 	case errors.Is(err, sql.ErrNoRows), isNoTable(err):
-		return 0, "", false, nil
+		return consumerState{direction: DirectionBoth, directed: cs.directed}, nil
 	case err != nil:
-		return 0, "", false, err
+		return consumerState{}, err
 	}
-	return committed, filter, true, nil
+	cs.found = true
+	return cs, nil
 }
 
 func (w *Watcher) counter(ctx context.Context, conn *sql.Conn) (int64, error) {

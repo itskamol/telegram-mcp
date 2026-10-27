@@ -373,7 +373,7 @@ func TestWatchAnnouncesOnlyConsumerChats(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "w.db")
 	db, s := writer(t, path)
 	defer db.Close()
-	if err := s.SetChats(context.Background(), "pos", []int64{watched}); err != nil {
+	if _, _, err := s.SetFilter(context.Background(), "pos", &[]int64{watched}, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -401,6 +401,45 @@ func TestWatchReadsConsumersWithoutChatIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	add(t, s, watched, 5, 0) // unacknowledged backlog
+	r := startWatch(t, path, "old", time.Hour)
+	if got := r.out.waitFor(t, 1); got[0].FirstID != 5 {
+		t.Fatalf("notices %+v", got)
+	}
+}
+
+func TestWatchSkipsOwnMessagesForIncomingConsumer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "w.db")
+	db, s := writer(t, path)
+	defer db.Close()
+	if _, _, err := s.SetFilter(context.Background(), "bot", nil, DirectionIn); err != nil {
+		t.Fatal(err)
+	}
+
+	r := startWatch(t, path, "bot", time.Hour)
+	time.Sleep(100 * time.Millisecond)
+	if _, err := s.Upsert(context.Background(), storage.KindChannel, 0,
+		tele.Message{ChatID: watched, ID: 1, Out: true}, int(time.Now().Unix())); err != nil {
+		t.Fatal(err)
+	}
+	add(t, s, watched, 2, 0)
+	r.out.waitFor(t, 1)
+	time.Sleep(100 * time.Millisecond)
+	if got := r.out.notices(t); len(got) != 1 || got[0].FirstID != 2 || got[0].Count != 1 {
+		t.Fatalf("notices %+v, want only incoming message 2", got)
+	}
+}
+
+func TestWatchReadsDatabasesWithoutDirection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, s := writer(t, path)
+	defer db.Close()
+	add(t, s, watched, 5, 0) // unacknowledged backlog
+	// A server of v0.6.0: chat_ids, but no direction and no out.
+	if _, err := db.SQL.Exec(`ALTER TABLE feed_consumers DROP COLUMN direction;
+		ALTER TABLE feed_messages DROP COLUMN out;
+		INSERT INTO feed_consumers (account, name, committed, delivered) VALUES ('default', 'old', 0, 0)`); err != nil {
+		t.Fatal(err)
+	}
 	r := startWatch(t, path, "old", time.Hour)
 	if got := r.out.waitFor(t, 1); got[0].FirstID != 5 {
 		t.Fatalf("notices %+v", got)

@@ -118,9 +118,15 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, 
 				"same messages come again, so nothing is lost if a session ends mid-batch. "+
 				"seq counts across all buffered chats and edits, so gaps in it are normal; use only the returned cursor, "+
 				"and only gap=true means unhandled messages expired. An edited message comes again with the same id and "+
-				"edited=true. out=true marks this account's own messages. Acknowledging does not mark anything read on "+
-				"Telegram (mark_chat_read does). chat_ids changes which chats this consumer reads from now on, not just "+
-				"this call."+untrusted, s.getNewMessages)
+				"edited=true. out=true marks this account's own messages; ones this server sent with send_message may be "+
+				"missing. set_feed_filter chooses which chats and directions a consumer reads; each answer shows its filter. "+
+				"Acknowledging does not mark anything read on Telegram (mark_chat_read does)."+untrusted, s.getNewMessages)
+		add(srv, "set_feed_filter", "Set Feed Filter", writeLocal,
+			"Choose what a get_new_messages consumer reads: chat_ids (some of the watched chats, [] for all) and direction "+
+				"(in: messages to this account, out: its own, both). The choice is saved for the consumer and also decides "+
+				"what telegram-mcp watch --consumer announces. Omitted fields keep their value; pass only consumer to see "+
+				"the current filter. A new filter applies after the consumer's acknowledged cursor: acknowledged messages "+
+				"never come back, even ones the old filter skipped, so read those with list_messages.", s.setFeedFilter)
 	}
 	if policy.ReadOnly {
 		return srv
