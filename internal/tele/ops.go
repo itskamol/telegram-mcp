@@ -54,6 +54,8 @@ type Message struct {
 	// Links lists hyperlinks whose target is hidden behind other text
 	// ([text](url)); plain URLs are already visible in Text.
 	Links []Link `json:"links,omitempty"`
+	// EditDate is Telegram's raw edit time, for ordering edits; 0 if never edited.
+	EditDate int `json:"-"`
 }
 
 // Link is a hyperlink hidden behind text.
@@ -342,6 +344,44 @@ func (s *Service) MarkRead(ctx context.Context, r Resolved) error {
 	return nil
 }
 
+// Convert turns one message that came with an update, plus the users and
+// chats the update carried, into a Message, caching those peers.
+func (s *Service) Convert(ctx context.Context, msg tg.MessageClass, e tg.Entities) (Message, bool, error) {
+	res := &tg.MessagesMessages{Messages: []tg.MessageClass{msg}}
+	for _, u := range e.Users {
+		res.Users = append(res.Users, u)
+	}
+	for _, c := range e.Chats {
+		res.Chats = append(res.Chats, c)
+	}
+	for _, c := range e.Channels {
+		res.Chats = append(res.Chats, c)
+	}
+	out, err := s.messages(ctx, res)
+	if err != nil || len(out) == 0 || out[0].Service == "empty" {
+		return Message{}, false, err
+	}
+	return out[0], true, nil
+}
+
+// TopicOf tells which forum topic a message is in. ok is false when that
+// cannot be told, which callers filtering by topic must treat as "drop".
+// In forums every message outside General carries a forum_topic reply
+// header, so a message without one, or with a plain reply, is in General.
+func TopicOf(m *tg.Message) (topicID int, ok bool) {
+	switch h := m.ReplyTo.(type) {
+	case nil:
+		return generalTopic, true
+	case *tg.MessageReplyHeader:
+		if _, t := replyAndTopic(h); t != 0 {
+			return t, true
+		}
+		return generalTopic, true
+	default:
+		return 0, false // story replies and future header kinds
+	}
+}
+
 func (s *Service) messages(ctx context.Context, res tg.MessagesMessagesClass) ([]Message, error) {
 	m, ok := res.AsModified()
 	if !ok {
@@ -377,6 +417,7 @@ func (s *Service) messages(ctx context.Context, res tg.MessagesMessagesClass) ([
 				Forward: msg.FwdFrom.FromID != nil || msg.FwdFrom.FromName != "" || msg.FwdFrom.Date != 0,
 				Links:   hiddenLinks(msg.Message, msg.Entities),
 			}
+			x.EditDate = msg.EditDate
 			if from, ok := msg.GetFromID(); ok {
 				x.FromID = markedPeer(from)
 			} else if !msg.Out {

@@ -102,6 +102,7 @@ claude mcp add telegram -- telegram-mcp serve
 | `list_topics` | `download_media` (local disk only) |
 | `get_media_info` | |
 | `view_photo` | |
+| `get_new_messages` (with `watch_chat_ids`) | |
 
 Conventions the tools share, so a model can carry what it learned from one
 tool to the next:
@@ -129,6 +130,36 @@ tool to the next:
   `get_me` returns the current local time.
 - **Errors** say what to do next; Telegram's code stays in brackets, e.g.
   `only messages sent by this account can be edited [MESSAGE_AUTHOR_REQUIRED]`.
+
+## Watching chats
+
+MCP tools are pulled, Telegram pushes. With chats listed in `config.toml`,
+`serve` receives Telegram updates and buffers new and edited messages of
+those chats, and the `get_new_messages` tool hands them out:
+
+```toml
+watch_chat_ids = [-1001889276137]
+watch_topics = { "-1001889276137" = [1] }   # optional: only General
+feed_retention_days = 7
+```
+
+- **Consumers**: the server keeps each consumer's position (`consumer`,
+  default `"default"`), so a new chat session continues where the last one
+  stopped. Pass the previous answer's `cursor` as `ack_cursor` once those
+  messages are handled; without it the same batch comes again, so a session
+  that dies mid-batch loses nothing (at-least-once). `wait_seconds` (up to 45)
+  waits for the next message instead of answering empty.
+- **Edits** replace the buffered message and deliver it again; **deletes**
+  remove it. `gap: true` means unhandled messages expired by retention.
+- **Topic filters fail closed**: a message whose forum topic cannot be told
+  is not buffered.
+- **No lost updates**: gotd's update state lives in the same SQLite database
+  and Telegram redelivers what came while the server was off. The handler
+  never reports an error to gotd (which would still advance pts): a write is
+  retried, then recorded in `feed_dead_letters`, and if even that fails the
+  server stops before that update's pts is saved.
+- Watching is read-only. Messages in the buffer are written by others:
+  agents should not act on them without the user.
 
 ## Safety settings
 

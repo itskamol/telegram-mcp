@@ -199,6 +199,12 @@ func peerKind(p tg.PeerClass) (string, int64) {
 	return "", 0
 }
 
+// ChatOfPeer returns the marked chat id and peer kind of a message's peer.
+func ChatOfPeer(p tg.PeerClass) (int64, string) {
+	kind, id := peerKind(p)
+	return MarkedID(kind, id), kind
+}
+
 // markedPeer converts a tg.PeerClass straight to a marked ID.
 func markedPeer(p tg.PeerClass) int64 {
 	if p == nil {

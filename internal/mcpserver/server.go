@@ -58,6 +58,7 @@ type Server struct {
 	svc    *tele.Service
 	policy Policy
 	audit  *audit.Log
+	feed   *Feed
 }
 
 // access is what a tool may change; it sets the MCP annotations.
@@ -71,8 +72,9 @@ const (
 )
 
 // New builds the MCP server and registers the tools the policy permits.
-func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string) *mcp.Server {
-	s := &Server{svc: svc, policy: policy, audit: auditLog}
+// fd enables get_new_messages; pass nil when no chat is watched.
+func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, fd *Feed) *mcp.Server {
+	s := &Server{svc: svc, policy: policy, audit: auditLog, feed: fd}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "telegram-mcp", Version: version}, nil)
 	roots := strings.Join(policy.AllowedRoots, ", ")
 
@@ -102,6 +104,14 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string) 
 		"Save a message's attachment to disk and return its path. Allowed directories: "+roots+
 			". dir defaults to the first one; a relative dir is inside it. Existing files are never overwritten.", s.downloadMedia)
 
+	if fd != nil {
+		add(srv, "get_new_messages", "Get New Messages", readTelegram,
+			"Return new and edited messages of the watched chats (watch_chat_ids in config.toml), oldest first. "+
+				"The server keeps each consumer's position across sessions. Pass the previous answer's cursor as "+
+				"ack_cursor once you have handled those messages; without it the same messages come again, so "+
+				"nothing is lost if a session ends mid-batch. wait_seconds waits for new messages. "+
+				"gap=true means older unhandled messages expired."+untrusted, s.getNewMessages)
+	}
 	if policy.ReadOnly {
 		return srv
 	}

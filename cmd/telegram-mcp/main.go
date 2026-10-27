@@ -25,11 +25,14 @@ import (
 	"github.com/gotd/contrib/middleware/floodwait"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth/qrlogin"
+	"github.com/gotd/td/telegram/updates"
+	"github.com/gotd/td/telegram/updates/hook"
 	"github.com/gotd/td/tg"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/itskamol/telegram-mcp-go/internal/audit"
 	"github.com/itskamol/telegram-mcp-go/internal/config"
+	"github.com/itskamol/telegram-mcp-go/internal/feed"
 	"github.com/itskamol/telegram-mcp-go/internal/hub"
 	"github.com/itskamol/telegram-mcp-go/internal/install"
 	"github.com/itskamol/telegram-mcp-go/internal/login"
@@ -198,10 +201,34 @@ func runServe(ctx context.Context, args []string) error {
 	}
 	defer auditLog.Close()
 
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	watch, err := e.cfg.Watch()
+	if err != nil {
+		return err
+	}
+	fw, err := newFeedWiring(ctx, e, watch, log)
+	if err != nil {
+		return err
+	}
+
 	// Flood waits up to a minute are slept through transparently; longer
 	// ones fail the tool call instead of hanging past its timeout.
 	waiter := floodwait.NewWaiter().WithMaxWait(time.Minute).WithMaxRetries(3)
-	c := e.client(nil, waiter)
+	var c *telegram.Client
+	if fw != nil {
+		// Updates that come back as RPC results (our own sends, reads and
+		// deletes) must reach the manager too, or its pts falls behind and
+		// every next update looks like a gap.
+		c = e.client(fw.gaps, waiter, hook.UpdateHook(fw.gaps.Handle), hook.AffectedHook(fw.gaps))
+	} else {
+		c = e.client(nil, waiter)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if fw != nil {
+		go fw.stopOnFatal(cancel, e, log)
+	}
 
 	return waiter.Run(ctx, func(ctx context.Context) error {
 		return c.Run(ctx, func(ctx context.Context) error {
@@ -221,25 +248,32 @@ func runServe(ctx context.Context, args []string) error {
 				MaxDownload:    int64(e.cfg.MaxDownloadMB) << 20,
 				MaxUpload:      int64(e.cfg.MaxUploadMB) << 20,
 			}
-			full := mcpserver.New(svc, policy, auditLog, version)
+			var feedTool *mcpserver.Feed
+			if fw != nil {
+				feedTool = &mcpserver.Feed{Store: fw.store, Notify: fw.handler.Notify}
+			}
+			full := mcpserver.New(svc, policy, auditLog, version, feedTool)
 			policy.ReadOnly = true
-			readOnlySrv := mcpserver.New(svc, policy, auditLog, version)
+			readOnlySrv := mcpserver.New(svc, policy, auditLog, version, feedTool)
 
 			// Serve other processes of this profile on two sockets, one per
 			// mode, so a --read-only relay can only reach read tools.
 			ctx, cancel := context.WithCancel(ctx)
 			var wg sync.WaitGroup
 			defer func() {
-				cancel()  // stops the listeners and relayed sessions...
+				cancel()  // stops the listeners, relayed sessions and updates...
 				wg.Wait() // ...and waits for them, in this order
 			}()
-			log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 			for ro, srv := range map[bool]*mcp.Server{false: full, true: readOnlySrv} {
 				ln, err := hub.Listen(hub.SocketPath(e.paths.DataDir, e.account, version, ro))
 				if err != nil {
 					return fmt.Errorf("listen for other processes: %w", err)
 				}
 				wg.Go(func() { hub.Serve(ctx, ln, srv, log) })
+			}
+			if fw != nil {
+				fw.handler.Service = svc // before updates start flowing
+				wg.Go(func() { fw.run(ctx, c.API(), self.ID, e.cfg.FeedRetentionDays, log) })
 			}
 
 			own := full
@@ -250,6 +284,70 @@ func runServe(ctx context.Context, args []string) error {
 			return own.Run(ctx, &mcp.StdioTransport{})
 		})
 	})
+}
+
+// feedWiring is what watching chats adds to serve: gotd's updates manager
+// feeding the buffer.
+type feedWiring struct {
+	store   *feed.Store
+	handler *feed.Handler
+	gaps    *updates.Manager
+}
+
+// newFeedWiring returns nil when no chat is watched; serve then runs
+// without Telegram updates, as before.
+func newFeedWiring(ctx context.Context, e *env, watch map[int64][]int, log *slog.Logger) (*feedWiring, error) {
+	if len(watch) == 0 {
+		return nil, nil
+	}
+	store, err := feed.NewStore(ctx, e.db, e.account)
+	if err != nil {
+		return nil, err
+	}
+	state, err := feed.NewState(ctx, e.db, storage.NewPeers(e.db, e.account), e.account)
+	if err != nil {
+		return nil, err
+	}
+	h := feed.NewHandler(store, feed.NewNotifier(), feed.Watch(watch), log)
+	d := tg.NewUpdateDispatcher()
+	h.Register(d)
+	gaps := updates.New(updates.Config{Handler: d, Storage: state, AccessHasher: state, UserAccessHasher: state})
+	return &feedWiring{store: store, handler: h, gaps: gaps}, nil
+}
+
+// run receives updates until ctx ends and prunes the buffer hourly.
+func (f *feedWiring) run(ctx context.Context, api *tg.Client, selfID int64, retentionDays int, log *slog.Logger) {
+	go func() {
+		retention := time.Duration(retentionDays) * 24 * time.Hour
+		for t := time.NewTicker(time.Hour); ; {
+			if n, err := f.store.Prune(ctx, time.Now().Add(-retention)); err != nil && ctx.Err() == nil {
+				log.Error("prune feed", "err", err)
+			} else if n > 0 {
+				log.Info("pruned feed", "messages", n)
+			}
+			select {
+			case <-t.C:
+			case <-ctx.Done():
+				t.Stop()
+				return
+			}
+		}
+	}()
+	if err := f.gaps.Run(ctx, api, selfID, updates.AuthOptions{}); err != nil && ctx.Err() == nil {
+		log.Error("telegram updates stopped", "err", err)
+	}
+}
+
+// stopOnFatal ends the process when buffering fails beyond recovery. The
+// failing handler is blocked, so the pts of its update is never saved and
+// Telegram redelivers it after restart. Closing the database first lets
+// SQLite checkpoint; committed data is safe in the WAL either way.
+func (f *feedWiring) stopOnFatal(cancel context.CancelFunc, e *env, log *slog.Logger) {
+	err := <-f.handler.Fatal
+	log.Error("stopping: telegram updates cannot be buffered", "err", err)
+	cancel()
+	e.close()
+	os.Exit(1)
 }
 
 func runLogin(ctx context.Context, args []string) error {

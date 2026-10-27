@@ -62,3 +62,22 @@ func TestValidateAccount(t *testing.T) {
 		}
 	}
 }
+
+func TestWatch(t *testing.T) {
+	c := Config{WatchChatIDs: []int64{-1001889276137, 42}, WatchTopics: map[string][]int{"-1001889276137": {1}}}
+	w, err := c.Watch()
+	if err != nil || len(w) != 2 || len(w[-1001889276137]) != 1 || w[42] != nil {
+		t.Fatalf("watch: %v %v", w, err)
+	}
+	bad := []Config{
+		{WatchTopics: map[string][]int{"-100": {1}}},                           // topic for unwatched chat
+		{WatchChatIDs: []int64{5}, WatchTopics: map[string][]int{"5": {}}},     // empty topic list
+		{WatchChatIDs: []int64{5}, WatchTopics: map[string][]int{"five": {1}}}, // bad key
+		{WatchChatIDs: []int64{5}, AllowedChatIDs: []int64{6}},                 // watched but not allowed
+	}
+	for i, c := range bad {
+		if _, err := c.Watch(); err == nil {
+			t.Errorf("case %d accepted", i)
+		}
+	}
+}

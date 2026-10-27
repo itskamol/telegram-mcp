@@ -74,6 +74,16 @@ func (p *Peers) Put(ctx context.Context, peers []Peer) error {
 	return tx.Commit()
 }
 
+// SetAccessHash records an access hash without touching the name fields,
+// for callers (the updates manager) that learn the hash alone.
+func (p *Peers) SetAccessHash(ctx context.Context, kind string, id, hash int64) error {
+	_, err := p.db.SQL.ExecContext(ctx, `
+		INSERT INTO peers (account, kind, id, access_hash, updated_at) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT (account, kind, id) DO UPDATE SET access_hash = excluded.access_hash, updated_at = excluded.updated_at`,
+		p.account, kind, id, hash, time.Now().Unix())
+	return err
+}
+
 // ErrPeerNotCached means the cache has no such peer.
 var ErrPeerNotCached = errors.New("peer not in cache")
 

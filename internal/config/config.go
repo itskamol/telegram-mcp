@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -44,6 +45,42 @@ type Config struct {
 	MaxDownloadMB int `toml:"max_download_mb"`
 	// MaxUploadMB caps a single send_file file. Default 50.
 	MaxUploadMB int `toml:"max_upload_mb"`
+
+	// WatchChatIDs are chats whose new messages are buffered for
+	// get_new_messages (marked ids, as list_chats returns them).
+	WatchChatIDs []int64 `toml:"watch_chat_ids"`
+	// WatchTopics limits a forum chat to some topics, keyed by chat id:
+	// { "-1001889276137" = [1] } keeps only General.
+	WatchTopics map[string][]int `toml:"watch_topics"`
+	// FeedRetentionDays drops buffered messages older than this. Default 7.
+	FeedRetentionDays int `toml:"feed_retention_days"`
+}
+
+// Watch returns watched chats and their topic filters. Topic keys must be
+// watched chats, and with allowed_chat_ids set every watched chat must be
+// allowed too, so the buffer can never hold a chat the tools refuse.
+func (c Config) Watch() (map[int64][]int, error) {
+	w := make(map[int64][]int, len(c.WatchChatIDs))
+	for _, id := range c.WatchChatIDs {
+		if len(c.AllowedChatIDs) > 0 && !slices.Contains(c.AllowedChatIDs, id) {
+			return nil, fmt.Errorf("watch_chat_ids: %d is not in allowed_chat_ids", id)
+		}
+		w[id] = nil
+	}
+	for key, topics := range c.WatchTopics {
+		id, err := strconv.ParseInt(key, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("watch_topics: key %q is not a chat id", key)
+		}
+		if _, ok := w[id]; !ok {
+			return nil, fmt.Errorf("watch_topics: chat %d is not in watch_chat_ids", id)
+		}
+		if len(topics) == 0 {
+			return nil, fmt.Errorf("watch_topics: chat %d has an empty topic list; remove the key to watch the whole chat", id)
+		}
+		w[id] = topics
+	}
+	return w, nil
 }
 
 // Defaults used when the setting is unset.
@@ -51,6 +88,7 @@ const (
 	DefaultMaxDelete     = 20
 	DefaultMaxDownloadMB = 50
 	DefaultMaxUploadMB   = 50
+	DefaultRetentionDays = 7
 )
 
 // Load reads config.toml if present and applies TELEGRAM_API_ID /
@@ -78,6 +116,12 @@ func Load(p Paths) (Config, error) {
 	}
 	if c.MaxUploadMB <= 0 {
 		c.MaxUploadMB = DefaultMaxUploadMB
+	}
+	if c.FeedRetentionDays <= 0 {
+		c.FeedRetentionDays = DefaultRetentionDays
+	}
+	if _, err := c.Watch(); err != nil {
+		return Config{}, err
 	}
 	home, _ := os.UserHomeDir()
 	if len(c.AllowedRoots) == 0 && home != "" {
