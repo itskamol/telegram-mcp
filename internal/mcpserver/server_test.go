@@ -57,14 +57,14 @@ func toolNames(t *testing.T, cs *mcp.ClientSession) map[string]*mcp.Tool {
 }
 
 var (
-	readTools  = []string{"get_me", "list_chats", "resolve_username", "search_contacts", "list_messages", "search_messages", "list_topics", "get_media_info", "view_photo"}
+	readTools  = []string{"get_me", "list_chats", "resolve_username", "search_contacts", "list_messages", "get_message", "search_messages", "list_topics", "get_media_info", "view_photo"}
 	writeTools = []string{"send_message", "send_file", "forward_messages", "edit_message", "delete_messages", "mark_chat_read"}
 )
 
 func TestToolList(t *testing.T) {
 	tools := toolNames(t, connect(t, Policy{MaxDelete: 20}))
-	if len(tools) != 16 {
-		t.Fatalf("got %d tools, want 16", len(tools))
+	if len(tools) != 17 {
+		t.Fatalf("got %d tools, want 17", len(tools))
 	}
 	if dl := tools["download_media"]; dl == nil || dl.Annotations.ReadOnlyHint || *dl.Annotations.DestructiveHint {
 		t.Error("download_media missing or mis-annotated")
@@ -117,6 +117,7 @@ func TestValidationBeforeTelegram(t *testing.T) {
 		{"download_media", map[string]any{"chat": "me", "message_id": 1, "dir": "../../etc"}, "outside allowed_roots"},
 		{"download_media", map[string]any{"chat": "me", "message_id": 1, "dir": "/etc"}, "outside allowed_roots"},
 		{"view_photo", map[string]any{"chat": "me", "message_id": 0}, "message_id is required"},
+		{"get_message", map[string]any{"chat": "me", "message_id": 0}, "message_id is required"},
 		{"send_message", map[string]any{"chat": "me", "text": "hi", "parse_mode": "rich"}, "parse_mode must be"},
 		// The limit counts the text after markup is removed.
 		{"send_message", map[string]any{"chat": "me", "parse_mode": "markdown", "text": "**" + strings.Repeat("x", 4097) + "**"}, "4096"},

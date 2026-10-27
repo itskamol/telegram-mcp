@@ -103,11 +103,15 @@ claude mcp add telegram -- telegram-mcp serve
 | `resolve_username` | `forward_messages` |
 | `search_contacts` | `edit_message` (destructive) |
 | `list_messages` | `delete_messages` (destructive) |
-| `search_messages` | `mark_chat_read` |
-| `list_topics` | `download_media` (local disk only) |
+| `get_message` | `mark_chat_read` |
+| `search_messages` | `download_media` (local disk only) |
+| `list_topics` | `set_feed_filter` (local consumer settings) |
 | `get_media_info` | |
 | `view_photo` | |
-| `get_new_messages` (with `watch_chat_ids` or `watch_all`) | `set_feed_filter` (local consumer settings) |
+| `get_new_messages` (with `watch_chat_ids` or `watch_all`) | |
+
+`get_new_messages` and `set_feed_filter` appear only when `config.toml`
+watches chats (see [Watching chats](#watching-chats)).
 
 Conventions the tools share, so a model can carry what it learned from one
 tool to the next:
@@ -132,7 +136,9 @@ tool to the next:
   second copy. A key counts per tool and chat. Timeouts of write tools say
   whether a retry is safe.
 - **Paging**: `list_messages` and `search_messages` return `has_more` and
-  `next_offset_id` to pass back as `offset_id`.
+  `next_offset_id` to pass back as `offset_id`. `get_message` reads one
+  message by id; a deleted id, or one from another chat, is an error that
+  says retrying will not help.
 - **Media**: `media` names the attachment kind. `link_preview` is only the
   preview of a link in the text, not a file; stickers carry `sticker_emoji`.
 - **Dates** are in the machine's local time zone with their UTC offset;
@@ -325,7 +331,7 @@ destination file already exists or a server is still running from the old place.
 - [x] Login (phone, QR, 2FA), status, logout
 - [x] Encrypted SQLite session, keychain key, single-process lock
 - [x] MCP server over stdio with flood-wait handling and per-tool timeouts
-- [x] 12 core tools (see [Tools](#tools))
+- [x] 17 core tools, plus 2 for watched chats (see [Tools](#tools))
 - [x] Safety: output sanitizing, chat allowlist, read-only mode, audit log
 - [x] Media: `get_media_info`, `download_media` (allowed roots, size limit), `view_photo`
 - [x] HTML formatting for sent messages, forum topics

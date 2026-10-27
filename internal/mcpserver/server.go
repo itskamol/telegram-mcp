@@ -95,6 +95,9 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, 
 			"In forums each message carries its topic_id; pass topic_id to list one topic (1 is General). "+
 			"media names the attachment kind; link_preview is only the preview of a link in the text, and stickers carry sticker_emoji."+
 			untrusted, s.listMessages)
+	add(srv, "get_message", "Get Message", readTelegram,
+		"Get one message of a chat by id, e.g. a reply_to target or an id from telegram-mcp watch. "+
+			"A deleted message, or an id from another chat, is an error that retrying will not change."+untrusted, s.getMessage)
 	add(srv, "search_messages", "Search Messages", readTelegram,
 		"Search one chat's messages for text, newest first. Page with offset_id = next_offset_id while has_more is true."+untrusted, s.searchMessages)
 	add(srv, "list_topics", "List Topics", readTelegram,
@@ -373,6 +376,32 @@ func (s *Server) listMessages(ctx context.Context, _ *mcp.CallToolRequest, in li
 		return nil, messagesOut{}, err
 	}
 	return nil, page(msgs, limit), nil
+}
+
+type getMessageIn struct {
+	Chat      ChatRef `json:"chat" jsonschema:"chat id from list_chats (number or string), @username, or me"`
+	MessageID int     `json:"message_id" jsonschema:"id of a message in this chat, e.g. from list_messages, reply_to or telegram-mcp watch"`
+}
+
+func (s *Server) getMessage(ctx context.Context, _ *mcp.CallToolRequest, in getMessageIn) (*mcp.CallToolResult, tele.Message, error) {
+	if in.MessageID <= 0 {
+		return nil, tele.Message{}, errors.New("message_id is required")
+	}
+	r, err := s.chat(ctx, in.Chat)
+	if err != nil {
+		return nil, tele.Message{}, err
+	}
+	msgs, err := s.svc.Get(ctx, r, []int{in.MessageID})
+	if err != nil {
+		return nil, tele.Message{}, err
+	}
+	if len(msgs) == 0 {
+		// Telegram answers a missing id with messageEmpty, not an error;
+		// say plainly that asking again cannot help.
+		return nil, tele.Message{}, fmt.Errorf("message %d is not in chat %d: it was deleted, or the id belongs to another chat; "+
+			"retrying will not change that. Get ids from list_messages or get_new_messages of this chat", in.MessageID, r.Marked)
+	}
+	return nil, msgs[0], nil
 }
 
 type searchMessagesIn struct {
