@@ -156,7 +156,8 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, 
 		"Delete messages from a chat; this cannot be undone. revoke=true deletes them for everyone, "+
 			"otherwise only for this account; in channels deletion is always for everyone.", s.deleteMessages)
 	add(srv, "mark_chat_read", "Mark Chat Read", writeAdd,
-		"Mark every message in a chat as read, clearing its unread count; senders see their messages as read.", s.markChatRead)
+		"Mark a chat's messages as read, all of them or up to max_id; senders see their messages as read. "+
+			"Pass max_id = the last message you handled, so later ones stay unread.", s.markChatRead)
 	return srv
 }
 
@@ -641,17 +642,21 @@ func (s *Server) forgetDeleted(ctx context.Context, r tele.Resolved, ids []int) 
 	return err
 }
 
-type chatIn struct {
-	Chat ChatRef `json:"chat" jsonschema:"chat id from list_chats (number or string), @username, or me"`
+type markReadIn struct {
+	Chat  ChatRef `json:"chat" jsonschema:"chat id from list_chats (number or string), @username, or me"`
+	MaxID int     `json:"max_id,omitempty" jsonschema:"mark messages up to and including this id as read; default every message"`
 }
 
-func (s *Server) markChatRead(ctx context.Context, _ *mcp.CallToolRequest, in chatIn) (*mcp.CallToolResult, okOut, error) {
+func (s *Server) markChatRead(ctx context.Context, _ *mcp.CallToolRequest, in markReadIn) (*mcp.CallToolResult, okOut, error) {
+	if in.MaxID < 0 {
+		return nil, okOut{}, errors.New("max_id must be a message id, or 0 for every message")
+	}
 	r, err := s.chat(ctx, in.Chat)
 	if err != nil {
 		return nil, okOut{}, err
 	}
-	err = s.svc.MarkRead(ctx, r)
-	if err := s.record(audit.Entry{Tool: "mark_chat_read", ChatID: r.Marked}, err); err != nil {
+	err = s.svc.MarkRead(ctx, r, in.MaxID)
+	if err := s.record(audit.Entry{Tool: "mark_chat_read", ChatID: r.Marked, IDs: nonZero(in.MaxID)}, err); err != nil {
 		return nil, okOut{}, err
 	}
 	return nil, okOut{OK: true}, nil

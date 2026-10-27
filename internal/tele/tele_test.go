@@ -1,6 +1,7 @@
 package tele
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/gotd/td/tgerr"
 
 	"github.com/itskamol/telegram-mcp-go/internal/storage"
+	"github.com/itskamol/telegram-mcp-go/internal/tele/teletest"
 )
 
 func TestMarkedIDRoundTrip(t *testing.T) {
@@ -266,5 +268,26 @@ func TestSendRequestNoPreview(t *testing.T) {
 		if req.Flags.Has(1) != off {
 			t.Errorf("noPreview=%v: no_webpage flag = %v", off, req.Flags.Has(1))
 		}
+	}
+}
+
+func TestMarkReadUpTo(t *testing.T) {
+	ctx := context.Background()
+	inv := &teletest.Invoker{Reply: &tg.MessagesAffectedMessages{}}
+	s := &Service{API: tg.NewClient(inv)}
+	if err := s.MarkRead(ctx, Resolved{Input: &tg.InputPeerSelf{}}, 41); err != nil {
+		t.Fatal(err)
+	}
+	if req, ok := inv.Requests[0].(*tg.MessagesReadHistoryRequest); !ok || req.MaxID != 41 {
+		t.Errorf("private chat: %#v", inv.Requests[0])
+	}
+
+	inv = &teletest.Invoker{Reply: &tg.BoolTrue{}}
+	s.API = tg.NewClient(inv)
+	if err := s.MarkRead(ctx, Resolved{Input: &tg.InputPeerChannel{ChannelID: 5, AccessHash: 7}}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if req, ok := inv.Requests[0].(*tg.ChannelsReadHistoryRequest); !ok || req.MaxID != 0 {
+		t.Errorf("channel, whole chat: %#v", inv.Requests[0])
 	}
 }

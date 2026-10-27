@@ -180,7 +180,8 @@ apply with it too.
   unacknowledged until its own cursor comes back. Without `ack_cursor` the
   same batch comes again, so a session that dies mid-batch loses nothing
   (at-least-once). Acknowledging does not mark messages read on Telegram;
-  `mark_chat_read` does that, and senders see it.
+  `mark_chat_read` does that, and senders see it; `max_id` stops it at the
+  last message you handled.
 - **`seq` and `cursor`** are positions in the buffer, not message ids. One
   counter runs across all buffered chats, and an edit takes a new value, so
   a consumer sees gaps in `seq` all the time; only `gap: true` means messages

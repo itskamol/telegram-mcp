@@ -118,6 +118,7 @@ func TestValidationBeforeTelegram(t *testing.T) {
 		{"download_media", map[string]any{"chat": "me", "message_id": 1, "dir": "/etc"}, "outside allowed_roots"},
 		{"view_photo", map[string]any{"chat": "me", "message_id": 0}, "message_id is required"},
 		{"get_message", map[string]any{"chat": "me", "message_id": 0}, "message_id is required"},
+		{"mark_chat_read", map[string]any{"chat": "me", "max_id": -1}, "max_id"},
 		{"send_message", map[string]any{"chat": "me", "text": "hi", "parse_mode": "rich"}, "parse_mode must be"},
 		// The limit counts the text after markup is removed.
 		{"send_message", map[string]any{"chat": "me", "parse_mode": "markdown", "text": "**" + strings.Repeat("x", 4097) + "**"}, "4096"},

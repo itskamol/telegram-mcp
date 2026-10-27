@@ -339,13 +339,14 @@ func (s *Service) Delete(ctx context.Context, r Resolved, ids []int, revoke bool
 	return nil
 }
 
-// MarkRead marks the whole chat as read.
-func (s *Service) MarkRead(ctx context.Context, r Resolved) error {
+// MarkRead marks a chat as read up to and including message maxID, or
+// all of it when maxID is 0.
+func (s *Service) MarkRead(ctx context.Context, r Resolved, maxID int) error {
 	var err error
 	if ch, ok := r.InputChannel(); ok {
-		_, err = s.API.ChannelsReadHistory(ctx, &tg.ChannelsReadHistoryRequest{Channel: ch})
+		_, err = s.API.ChannelsReadHistory(ctx, &tg.ChannelsReadHistoryRequest{Channel: ch, MaxID: maxID})
 	} else {
-		_, err = s.API.MessagesReadHistory(ctx, &tg.MessagesReadHistoryRequest{Peer: r.Input})
+		_, err = s.API.MessagesReadHistory(ctx, &tg.MessagesReadHistoryRequest{Peer: r.Input, MaxID: maxID})
 	}
 	if err != nil {
 		return fmt.Errorf("mark as read: %w", err)

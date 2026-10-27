@@ -135,19 +135,19 @@ func TestGuardTimeoutAdvice(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "check list_messages before retrying") {
 		t.Errorf("without key: %v", err)
 	}
-	read := func(context.Context, *mcp.CallToolRequest, chatIn) (*mcp.CallToolResult, okOut, error) {
+	read := func(context.Context, *mcp.CallToolRequest, markReadIn) (*mcp.CallToolResult, okOut, error) {
 		return nil, okOut{}, context.DeadlineExceeded
 	}
-	if _, _, err := guard(readTelegram, read)(context.Background(), nil, chatIn{}); err == nil || strings.Contains(err.Error(), "gone through") {
+	if _, _, err := guard(readTelegram, read)(context.Background(), nil, markReadIn{}); err == nil || strings.Contains(err.Error(), "gone through") {
 		t.Errorf("read timeout: %v", err)
 	}
 }
 
 func TestGuardExplainsTelegramErrors(t *testing.T) {
-	h := func(context.Context, *mcp.CallToolRequest, chatIn) (*mcp.CallToolResult, okOut, error) {
+	h := func(context.Context, *mcp.CallToolRequest, markReadIn) (*mcp.CallToolResult, okOut, error) {
 		return nil, okOut{}, tgerr.New(400, "MESSAGE_NOT_MODIFIED")
 	}
-	_, _, err := guard(writeChange, h)(context.Background(), nil, chatIn{})
+	_, _, err := guard(writeChange, h)(context.Background(), nil, markReadIn{})
 	if err == nil || !strings.Contains(err.Error(), "nothing was changed") {
 		t.Errorf("got %v", err)
 	}
