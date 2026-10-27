@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"unicode/utf8"
 )
@@ -145,5 +146,17 @@ func TestOpenFile(t *testing.T) {
 	}
 	if _, _, err := OpenFile(nil, "photo.jpg"); err == nil {
 		t.Error("no roots accepted")
+	}
+}
+
+func TestOSDeniedExplainsEPERM(t *testing.T) {
+	eperm := &os.PathError{Op: "open", Path: "/Users/x/Downloads/a.pdf", Err: syscall.EPERM}
+	err := osDenied(eperm, "/Users/x/Downloads/a.pdf")
+	if !errors.Is(err, syscall.EPERM) || !strings.Contains(err.Error(), "allowed_roots") {
+		t.Errorf("EPERM: %v", err)
+	}
+	eacces := &os.PathError{Op: "open", Path: "/tmp/a", Err: syscall.EACCES}
+	if err := osDenied(eacces, "/tmp/a"); err != eacces {
+		t.Errorf("EACCES changed: %v", err)
 	}
 }

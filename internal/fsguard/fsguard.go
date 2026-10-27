@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"unicode"
 	"unicode/utf8"
 )
@@ -64,7 +66,7 @@ func ResolveDir(roots []string, dir string) (string, error) {
 	}
 	if dir == "" {
 		if err := os.MkdirAll(roots[0], 0o700); err != nil {
-			return "", fmt.Errorf("create %s: %w", roots[0], err)
+			return "", osDenied(fmt.Errorf("create %s: %w", roots[0], err), roots[0])
 		}
 		dir = roots[0]
 	} else if !filepath.IsAbs(dir) {
@@ -77,8 +79,11 @@ func ResolveDir(roots []string, dir string) (string, error) {
 		return "", outside // ".." escapes, caught before touching the disk
 	}
 	real, err := filepath.EvalSymlinks(dir)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return "", fmt.Errorf("directory %s does not exist inside allowed_roots", dir)
+	}
+	if err != nil {
+		return "", osDenied(err, dir)
 	}
 	for _, root := range roots {
 		rr, err := filepath.EvalSymlinks(root)
@@ -107,7 +112,7 @@ func within(root, path string) bool {
 func WriteNew(dir, name string, limit int64, write func(io.Writer) error) (string, error) {
 	tmp, err := os.CreateTemp(dir, ".telegram-mcp-*.part")
 	if err != nil {
-		return "", err
+		return "", osDenied(err, dir)
 	}
 	defer os.Remove(tmp.Name())
 
@@ -191,8 +196,11 @@ func OpenFile(roots []string, path string) (*os.File, os.FileInfo, error) {
 	}
 
 	real, err := filepath.EvalSymlinks(path)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil, fmt.Errorf("%s does not exist", path)
+	}
+	if err != nil {
+		return nil, nil, osDenied(err, path)
 	}
 	inRoot := false
 	for _, root := range roots {
@@ -207,7 +215,7 @@ func OpenFile(roots []string, path string) (*os.File, os.FileInfo, error) {
 
 	f, err := os.Open(real)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, osDenied(err, path)
 	}
 	fi, err := f.Stat()
 	if err == nil && !fi.Mode().IsRegular() {
@@ -236,4 +244,17 @@ func hiddenBelow(root, path string) bool {
 	return slices.ContainsFunc(strings.Split(rel, string(filepath.Separator)), func(c string) bool {
 		return strings.HasPrefix(c, ".")
 	})
+}
+
+// osDenied explains EPERM, which on macOS comes from privacy protection
+// rather than file modes (those give EACCES): Downloads, Documents and
+// Desktop need the user's consent for the app that runs telegram-mcp.
+// Without this the agent sees only "operation not permitted".
+func osDenied(err error, path string) error {
+	if !errors.Is(err, syscall.EPERM) {
+		return err
+	}
+	return fmt.Errorf("the operating system refused access to %s (%w); on macOS, Downloads, Documents and Desktop "+
+		"need Files and Folders permission for the app that runs telegram-mcp (System Settings > Privacy & Security), "+
+		"or allowed_roots in config.toml can point to a folder outside them", path, err)
 }

@@ -240,6 +240,10 @@ max_upload_mb = 50                       # per send_file file
   as `.env` or `.ssh/` (also through symlinks), and checks that the file it
   opened is the one it validated.
 - `view_photo` shows the model a copy scaled to at most 1280 px (5 MB cap).
+- On macOS, `~/Downloads` (the default root), `~/Documents` and `~/Desktop`
+  need Files and Folders permission for the app that runs `telegram-mcp`.
+  Without it the file tools fail with "operation not permitted" and say so;
+  grant the permission or move `allowed_roots` elsewhere.
 - Flood waits up to a minute are absorbed; each tool call times out after 55 s.
 - Only the user decides what is buffered (`watch_chat_ids`, `watch_all`);
   `get_new_messages chat_ids` can narrow that, never widen it. Login codes
