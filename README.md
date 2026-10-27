@@ -179,15 +179,14 @@ telegram-mcp watch --consumer default
   text, so nothing private ends up in notifications or logs. The agent then
   calls `get_new_messages(consumer, ack_cursor)` to read and acknowledge.
 - It never writes and never acknowledges; delivery guarantees stay with the
-  consumer's server-side offset. Messages left unacknowledged for
-  `--reannounce` (default 5m) are announced again in the same format, so an
+  consumer's server-side offset. Messages left unacknowledged for 5
+  minutes are announced again in the same format, so an
   agent that died mid-batch is woken again; unacknowledged messages from
   before `watch` started are announced at once.
 - It reads the database read-only next to the running server, without the
   profile lock, and holds no read transaction between checks, so the
   server's WAL checkpoints are never blocked. It checks `PRAGMA
-  data_version` every `--interval` (default 500ms; about 3 µs of CPU per
-  check) and queries only when another process committed.
+  data_version` every 500ms (about 3 µs of CPU per check) and queries only when another process committed.
 - It waits for a database or feed tables that do not exist yet, reopens
   the file if it is replaced, and exits when its output pipe closes.
 

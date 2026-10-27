@@ -5,7 +5,7 @@
 //	telegram-mcp status [--account name]
 //	telegram-mcp logout [--account name]
 //	telegram-mcp install claude-desktop|claude-code [--name telegram] [--read-only] [--force]
-//	telegram-mcp watch [--consumer default] [--interval 500ms] [--account name]
+//	telegram-mcp watch [--consumer default] [--account name]
 //	telegram-mcp version
 package main
 
@@ -54,7 +54,7 @@ Usage:
   telegram-mcp status [--account name]
   telegram-mcp logout [--account name]
   telegram-mcp install claude-desktop|claude-code [--name telegram] [--read-only] [--force]
-  telegram-mcp watch  [--consumer default] [--interval 500ms] [--account name]   one JSON line per batch of new messages
+  telegram-mcp watch  [--consumer default] [--account name]   one JSON line per batch of new messages
   telegram-mcp version
 
 Settings live in ~/.config/telegram-mcp/config.toml (see "status").
@@ -551,16 +551,11 @@ func runWatch(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	account := fs.String("account", config.DefaultAccount, "account label")
 	consumer := fs.String("consumer", "default", "get_new_messages consumer whose acknowledgements end re-announcements")
-	interval := fs.Duration("interval", 500*time.Millisecond, "how often to check the database for changes")
-	stale := fs.Duration("reannounce", 5*time.Minute, "announce unacknowledged messages again after this long")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if err := config.ValidateAccount(*account); err != nil {
 		return err
-	}
-	if *interval < 50*time.Millisecond || *stale < time.Second {
-		return errors.New("--interval must be at least 50ms and --reannounce at least 1s")
 	}
 	paths, err := config.ResolvePaths()
 	if err != nil {
@@ -568,7 +563,7 @@ func runWatch(ctx context.Context, args []string) error {
 	}
 	w := &feed.Watcher{
 		Path: paths.DB, Account: *account, Consumer: *consumer,
-		Every: *interval, Stale: *stale, Out: os.Stdout,
+		Every: 500 * time.Millisecond, Stale: 5 * time.Minute, Out: os.Stdout,
 		Log: slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
 	return w.Run(ctx)

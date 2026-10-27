@@ -11,6 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
+
 	"github.com/itskamol/telegram-mcp-go/internal/storage"
 )
 
@@ -258,6 +261,12 @@ func (w *Watcher) emit(n Notice) error {
 	return nil
 }
 
+// isNoTable reports a missing table, which means the server has not
+// created the feed yet. SQLite gives it the generic SQLITE_ERROR code,
+// shared with syntax errors and others, so the message is checked too;
+// SQLITE_BUSY, I/O errors and anything not from SQLite never match.
 func isNoTable(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "no such table")
+	var se *sqlite.Error
+	return errors.As(err, &se) && se.Code() == sqlite3.SQLITE_ERROR &&
+		strings.Contains(se.Error(), "no such table")
 }

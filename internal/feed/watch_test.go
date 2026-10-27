@@ -295,3 +295,28 @@ func TestWatchStopsWhenOutputBreaks(t *testing.T) {
 		t.Fatal("watcher kept running with nobody reading its output")
 	}
 }
+
+func TestIsNoTable(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "n.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, missing := db.SQL.Exec(`SELECT * FROM feed_messages`)
+	_, syntax := db.SQL.Exec(`SELEC 1`)
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"missing table", missing, true},
+		{"syntax error, same SQLITE_ERROR code", syntax, false},
+		{"not from SQLite, same words", errors.New("no such table: feed_messages"), false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		if got := isNoTable(c.err); got != c.want {
+			t.Errorf("%s: isNoTable(%v) = %v", c.name, c.err, got)
+		}
+	}
+}
