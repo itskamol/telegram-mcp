@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/gotd/td/telegram/message/peer"
 	"github.com/gotd/td/telegram/query/dialogs"
@@ -47,6 +48,15 @@ type Message struct {
 	Edited   bool   `json:"edited,omitempty"`
 	Forward  bool   `json:"forwarded,omitempty"`
 	Service  string `json:"service,omitempty"`
+	// Links lists hyperlinks whose target is hidden behind other text
+	// ([text](url)); plain URLs are already visible in Text.
+	Links []Link `json:"links,omitempty"`
+}
+
+// Link is a hyperlink hidden behind text.
+type Link struct {
+	Text string `json:"text"`
+	URL  string `json:"url"`
 }
 
 // Dialogs lists chats, most recent first, and refreshes the peer cache.
@@ -331,6 +341,7 @@ func (s *Service) messages(ctx context.Context, res tg.MessagesMessagesClass) ([
 				Media:   mediaKind(msg.Media),
 				Edited:  msg.EditDate != 0,
 				Forward: msg.FwdFrom.FromID != nil || msg.FwdFrom.FromName != "" || msg.FwdFrom.Date != 0,
+				Links:   hiddenLinks(msg.Message, msg.Entities),
 			}
 			if from, ok := msg.GetFromID(); ok {
 				x.FromID = markedPeer(from)
@@ -357,10 +368,38 @@ func (s *Service) messages(ctx context.Context, res tg.MessagesMessagesClass) ([
 	return out, nil
 }
 
+// hiddenLinks extracts [text](url) links. Entity offsets count UTF-16
+// code units, so the text is indexed in UTF-16.
+func hiddenLinks(text string, ents []tg.MessageEntityClass) []Link {
+	var units []uint16
+	var out []Link
+	for _, e := range ents {
+		u, ok := e.(*tg.MessageEntityTextURL)
+		if !ok {
+			continue
+		}
+		if units == nil {
+			units = utf16.Encode([]rune(text))
+		}
+		if u.Offset < 0 || u.Length < 0 || u.Offset+u.Length > len(units) {
+			continue
+		}
+		out = append(out, Link{
+			Text: sanitize.Name(string(utf16.Decode(units[u.Offset : u.Offset+u.Length]))),
+			URL:  sanitize.Name(u.URL),
+		})
+	}
+	return out
+}
+
 func mediaKind(m tg.MessageMediaClass) string {
 	switch m := m.(type) {
 	case nil, *tg.MessageMediaEmpty:
 		return ""
+	case *tg.MessageMediaWebPage:
+		// A link preview, not a file: get_media_info reports it as not
+		// downloadable, and the name says so up front.
+		return "link_preview"
 	case *tg.MessageMediaDocument:
 		if d, ok := m.Document.(*tg.Document); ok {
 			for _, a := range d.Attributes {

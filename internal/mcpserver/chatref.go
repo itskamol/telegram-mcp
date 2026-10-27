@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -51,5 +52,26 @@ func inputSchema[In any]() *jsonschema.Schema {
 	if err != nil {
 		panic(fmt.Sprintf("schema for %T: %v", *new(In), err)) // a bug in the input struct
 	}
+	dropNull(s)
 	return s
+}
+
+// dropNull removes "null" from type unions. jsonschema makes Go slices
+// nullable (["null","array"]), and MCP clients show such a union without
+// any type, so the model no longer sees that message_ids is a list of
+// integers. A missing optional field already means "not given".
+func dropNull(s *jsonschema.Schema) {
+	if s == nil {
+		return
+	}
+	if len(s.Types) > 1 {
+		s.Types = slices.DeleteFunc(s.Types, func(t string) bool { return t == "null" })
+		if len(s.Types) == 1 {
+			s.Type, s.Types = s.Types[0], nil
+		}
+	}
+	for _, p := range s.Properties {
+		dropNull(p)
+	}
+	dropNull(s.Items)
 }

@@ -180,3 +180,23 @@ func TestMatches(t *testing.T) {
 		t.Error("unrelated query matched")
 	}
 }
+
+func TestHiddenLinks(t *testing.T) {
+	// "👋 " is 3 UTF-16 units, so "havola" starts at offset 3.
+	text := "👋 havola va https://x.uz"
+	ents := []tg.MessageEntityClass{
+		&tg.MessageEntityTextURL{Offset: 3, Length: 6, URL: "https://github.com/itskamol"},
+		&tg.MessageEntityURL{Offset: 13, Length: 12},              // visible already
+		&tg.MessageEntityTextURL{Offset: 50, Length: 3, URL: "x"}, // out of range: skipped
+	}
+	got := hiddenLinks(text, ents)
+	if len(got) != 1 || got[0].Text != "havola" || got[0].URL != "https://github.com/itskamol" {
+		t.Fatalf("got %+v", got)
+	}
+	if hiddenLinks("plain", nil) != nil {
+		t.Error("links invented for plain text")
+	}
+	if got := mediaKind(&tg.MessageMediaWebPage{}); got != "link_preview" {
+		t.Errorf("webpage kind = %q", got)
+	}
+}

@@ -149,3 +149,16 @@ func TestDuplicateSendIsSuccess(t *testing.T) {
 		t.Fatal("real error swallowed")
 	}
 }
+
+func TestIDListsAreTypedArrays(t *testing.T) {
+	for _, tool := range []string{"delete_messages", "forward_messages"} {
+		b, _ := json.Marshal(toolNames(t, connect(t, Policy{MaxDelete: 20}))[tool].InputSchema)
+		var s struct {
+			Properties map[string]map[string]any
+		}
+		_ = json.Unmarshal(b, &s)
+		if ty := s.Properties["message_ids"]["type"]; ty != "array" {
+			t.Errorf("%s.message_ids type = %v, want array", tool, ty)
+		}
+	}
+}
