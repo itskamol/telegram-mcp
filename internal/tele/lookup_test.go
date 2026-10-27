@@ -80,3 +80,20 @@ func TestConvertNamesSenderFromCache(t *testing.T) {
 		t.Errorf("unknown sender: %+v %v", m, err)
 	}
 }
+
+func TestStickerEmoji(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := &Service{Peers: storage.NewPeers(db, "default"), SelfID: 1}
+	msg := &tg.Message{ID: 3, PeerID: &tg.PeerUser{UserID: 1}, Out: true,
+		Media: &tg.MessageMediaDocument{Document: &tg.Document{MimeType: "application/x-tgsticker",
+			Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeSticker{Alt: "😂"}}}}}
+	m, _, err := s.Convert(ctx, msg, tg.Entities{})
+	if err != nil || m.Media != "sticker" || m.StickerEmoji != "😂" {
+		t.Errorf("got %q %q %v", m.Media, m.StickerEmoji, err)
+	}
+}

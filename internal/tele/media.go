@@ -26,6 +26,8 @@ type MediaInfo struct {
 	Width     int    `json:"width,omitempty"`
 	Height    int    `json:"height,omitempty"`
 	Duration  int    `json:"duration_seconds,omitempty"`
+	// StickerEmoji is the emoji a sticker stands for.
+	StickerEmoji string `json:"sticker_emoji,omitempty"`
 	// Downloadable is false for media without a file (polls, locations, links).
 	Downloadable bool `json:"downloadable"`
 }
@@ -80,6 +82,8 @@ func (s *Service) Media(ctx context.Context, r Resolved, id int) (MediaFile, err
 				f.Info.Width, f.Info.Height = a.W, a.H
 			case *tg.DocumentAttributeAudio:
 				f.Info.Duration = a.Duration
+			case *tg.DocumentAttributeSticker:
+				f.Info.StickerEmoji = sanitize.Name(a.Alt)
 			}
 		}
 		f.Location = &tg.InputDocumentFileLocation{ID: d.ID, AccessHash: d.AccessHash, FileReference: d.FileReference}

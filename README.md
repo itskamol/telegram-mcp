@@ -132,6 +132,8 @@ tool to the next:
   second copy. Timeouts of write tools say whether a retry is safe.
 - **Paging**: `list_messages` and `search_messages` return `has_more` and
   `next_offset_id` to pass back as `offset_id`.
+- **Media**: `media` names the attachment kind. `link_preview` is only the
+  preview of a link in the text, not a file; stickers carry `sticker_emoji`.
 - **Dates** are in the machine's local time zone with their UTC offset;
   `get_me` returns the current local time.
 - **Errors** say what to do next; Telegram's code stays in brackets, e.g.

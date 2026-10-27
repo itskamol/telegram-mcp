@@ -49,9 +49,12 @@ type Message struct {
 	// set for a real reply inside the topic.
 	TopicID int    `json:"topic_id,omitempty"`
 	Media   string `json:"media,omitempty"`
-	Edited  bool   `json:"edited,omitempty"`
-	Forward bool   `json:"forwarded,omitempty"`
-	Service string `json:"service,omitempty"`
+	// StickerEmoji is the emoji a sticker stands for, so its meaning needs
+	// no download.
+	StickerEmoji string `json:"sticker_emoji,omitempty"`
+	Edited       bool   `json:"edited,omitempty"`
+	Forward      bool   `json:"forwarded,omitempty"`
+	Service      string `json:"service,omitempty"`
 	// Links lists hyperlinks whose target is hidden behind other text
 	// ([text](url)); plain URLs are already visible in Text.
 	Links []Link `json:"links,omitempty"`
@@ -419,6 +422,9 @@ func (s *Service) messages(ctx context.Context, res tg.MessagesMessagesClass) ([
 				Links:   hiddenLinks(msg.Message, msg.Entities),
 			}
 			x.EditDate = msg.EditDate
+			if st, ok := sticker(msg.Media); ok {
+				x.StickerEmoji = sanitize.Name(st.Alt)
+			}
 			if from, ok := msg.GetFromID(); ok {
 				x.FromID = markedPeer(from)
 			} else if !msg.Out {
@@ -458,6 +464,24 @@ func (s *Service) senderName(ctx context.Context, names map[int64]string, marked
 		return "" // best effort: an unknown sender still has from_id
 	}
 	return sanitize.Name(p.Title)
+}
+
+// sticker returns a message's sticker attribute, if it is a sticker.
+func sticker(m tg.MessageMediaClass) (*tg.DocumentAttributeSticker, bool) {
+	md, ok := m.(*tg.MessageMediaDocument)
+	if !ok {
+		return nil, false
+	}
+	d, ok := md.Document.(*tg.Document)
+	if !ok {
+		return nil, false
+	}
+	for _, a := range d.Attributes {
+		if st, ok := a.(*tg.DocumentAttributeSticker); ok {
+			return st, true
+		}
+	}
+	return nil, false
 }
 
 // hiddenLinks extracts [text](url) links. Entity offsets count UTF-16
