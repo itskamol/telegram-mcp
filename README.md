@@ -168,7 +168,8 @@ feed_retention_days = 7
 default because it writes every incoming message to disk. Telegram's
 service chat `777000`, which sends login codes, is never buffered, and
 `allowed_chat_ids` still limits it. `watch_topics` filters of listed chats
-apply with it too.
+apply with it too. With `watch_all` a new consumer reads nothing until it
+chooses its chats with `set_feed_filter` (see Filters below).
 
 - **Consumers**: the server keeps each consumer's position (`consumer`,
   default `"default"`), so a new chat session continues where the last one
@@ -304,6 +305,13 @@ max_upload_mb = 50                       # per send_file file
 - Only the user decides what is buffered (`watch_chat_ids`, `watch_all`);
   `set_feed_filter` can narrow that, never widen it. Login codes
   from Telegram's `777000` are never buffered, even with `watch_all`.
+- With `watch_all`, a new consumer must choose its chats before its first
+  read: `get_new_messages` refuses, before any message reaches the agent,
+  until `set_feed_filter` sets `chat_ids` (`[]` chooses every chat on
+  purpose). An agent started for one group does not get every private chat
+  by default. Consumers that existed before this rule keep reading as they
+  did. `watch` cannot tell and still announces such a consumer's chats, ids
+  only; the agent then gets the refusal.
 
 ## Where files live
 

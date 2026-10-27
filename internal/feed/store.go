@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS feed_consumers (
 	delivered INTEGER NOT NULL DEFAULT 0,
 	chat_ids  TEXT    NOT NULL DEFAULT '',
 	direction TEXT    NOT NULL DEFAULT 'both',
+	chats_chosen INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (account, name)
 );
 CREATE TABLE IF NOT EXISTS feed_dead_letters (
@@ -109,6 +110,9 @@ var added = []struct{ table, column, ddl, fill string }{
 		`UPDATE feed_messages SET out = COALESCE(json_extract(body, '$.out'), 0)`},
 	// After out: watch takes a direction column as proof that out exists.
 	{"feed_consumers", "direction", `ALTER TABLE feed_consumers ADD COLUMN direction TEXT NOT NULL DEFAULT 'both'`, ""},
+	// Consumers from before the column keep reading as they did.
+	{"feed_consumers", "chats_chosen", `ALTER TABLE feed_consumers ADD COLUMN chats_chosen INTEGER NOT NULL DEFAULT 0`,
+		`UPDATE feed_consumers SET chats_chosen = 1`},
 }
 
 // NewStore creates the tables if needed and adds columns that older
@@ -189,7 +193,7 @@ func (s *Store) SetFilter(ctx context.Context, consumer string, chats *[]int64, 
 			}
 			list = string(b)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE feed_consumers SET chat_ids = ? WHERE account = ? AND name = ?`,
+		if _, err := tx.ExecContext(ctx, `UPDATE feed_consumers SET chat_ids = ?, chats_chosen = 1 WHERE account = ? AND name = ?`,
 			list, s.account, consumer); err != nil {
 			return Filter{}, 0, err
 		}
@@ -211,6 +215,19 @@ func (s *Store) SetFilter(ctx context.Context, consumer string, chats *[]int64, 
 		return Filter{}, 0, err
 	}
 	return f, committed, tx.Commit()
+}
+
+// ChatsChosen reports whether a consumer's chats were ever set, even to
+// "every chat". Under watch_all a consumer must choose before it reads,
+// so that an agent started for one chat does not get all of them.
+func (s *Store) ChatsChosen(ctx context.Context, consumer string) (bool, error) {
+	var chosen bool
+	err := s.db.SQL.QueryRowContext(ctx, `SELECT chats_chosen FROM feed_consumers WHERE account = ? AND name = ?`,
+		s.account, consumer).Scan(&chosen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return chosen, err
 }
 
 // CheckDirection accepts a direction, or "" for "leave it as it is".

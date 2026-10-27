@@ -365,3 +365,35 @@ func TestEditToSameTextSucceeds(t *testing.T) {
 		t.Fatalf("other errors must still fail: %+v", out)
 	}
 }
+
+// With watch_all a new consumer would read every chat of the account, so
+// it must choose its chats before the first message reaches the agent.
+func TestWatchAllNeedsAChoice(t *testing.T) {
+	fd := newFeed(t)
+	fd.Scope = feed.Scope{All: true}
+	cs := connectFeed(t, Policy{MaxDelete: 20}, fd)
+	call := func(tool string, args map[string]any) (bool, string) {
+		t.Helper()
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tool, Arguments: args})
+		if err != nil {
+			t.Fatalf("%s: %v", tool, err)
+		}
+		return res.IsError, res.Content[0].(*mcp.TextContent).Text
+	}
+	if isErr, text := call("get_new_messages", map[string]any{"consumer": "pos"}); !isErr || !strings.Contains(text, "set_feed_filter") {
+		t.Fatalf("unchosen consumer under watch_all: %v %q", isErr, text)
+	}
+	if isErr, text := call("set_feed_filter", map[string]any{"consumer": "pos", "chat_ids": []any{}}); isErr {
+		t.Fatalf("choose every chat: %q", text)
+	}
+	if isErr, text := call("get_new_messages", map[string]any{"consumer": "pos"}); isErr {
+		t.Fatalf("after choosing: %q", text)
+	}
+
+	// Without watch_all the user listed the chats; nothing to choose.
+	cs = connectFeed(t, Policy{MaxDelete: 20}, newFeed(t))
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_new_messages", Arguments: map[string]any{"consumer": "pos"}})
+	if err != nil || res.IsError {
+		t.Fatalf("watch_chat_ids consumer: %v %v", res, err)
+	}
+}

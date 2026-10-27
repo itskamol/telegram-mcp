@@ -239,6 +239,36 @@ func TestStoreAddsChatIDsToOldConsumers(t *testing.T) {
 	if committed != 7 || chats != "" {
 		t.Fatalf("migrated consumer: committed %d, chat_ids %q", committed, chats)
 	}
+	// A consumer from before chats_chosen keeps reading as it did.
+	s, err := NewStore(ctx, db, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chosen, err := s.ChatsChosen(ctx, "pos"); err != nil || !chosen {
+		t.Fatalf("old consumer not marked as having chosen: %v %v", chosen, err)
+	}
+}
+
+func TestChatsChosen(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	chosen := func() bool {
+		t.Helper()
+		c, err := s.ChatsChosen(ctx, "new")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	if chosen() {
+		t.Fatal("a consumer that does not exist has chosen")
+	}
+	if _, _, err := s.SetFilter(ctx, "new", nil, DirectionIn); err != nil || chosen() {
+		t.Fatalf("a direction alone counts as a choice of chats: %v", err)
+	}
+	if _, _, err := s.SetFilter(ctx, "new", &[]int64{}, ""); err != nil || !chosen() {
+		t.Fatalf("chat_ids=[] (every chat, on purpose) is not a choice: %v", err)
+	}
 }
 
 func TestConsumerDirection(t *testing.T) {

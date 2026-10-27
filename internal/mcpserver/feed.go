@@ -56,6 +56,19 @@ func (s *Server) getNewMessages(ctx context.Context, _ *mcp.CallToolRequest, in 
 			return nil, feed.Batch{}, err
 		}
 	}
+	if s.feed.Scope.All {
+		// Refuse before any message reaches the agent: a warning that came
+		// with the messages would come after every chat was already read.
+		chosen, err := s.feed.Store.ChatsChosen(ctx, consumer)
+		if err != nil {
+			return nil, feed.Batch{}, err
+		}
+		if !chosen {
+			return nil, feed.Batch{}, fmt.Errorf("watch_all is on, so consumer %q would read every chat of this account; "+
+				"choose its chats first with set_feed_filter(consumer=%q, chat_ids=[...]), or chat_ids=[] to read every chat on purpose",
+				consumer, consumer)
+		}
+	}
 	limit := clamp(in.Limit, 50, 100)
 	wait := min(time.Duration(max(in.WaitSeconds, 0))*time.Second, maxWait)
 	timer := time.NewTimer(wait)

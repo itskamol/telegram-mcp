@@ -131,11 +131,14 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, 
 				"and only gap=true means unhandled messages expired. An edited message comes again with the same id and "+
 				"edited=true. out=true marks this account's own messages, except in Saved Messages, where Telegram marks none: "+
 				"an agent that writes there reads its own replies as new. Messages this server sent with send_message to "+
-				"other private chats may be missing. set_feed_filter chooses which chats and directions a consumer reads; each answer shows its filter. "+
+				"other private chats may be missing. set_feed_filter chooses which chats and directions a consumer reads; "+
+				"each answer shows its filter. With watch_all on, a new consumer must choose its chats there before its "+
+				"first read. "+
 				"Acknowledging does not mark anything read on Telegram (mark_chat_read does)."+untrusted, s.getNewMessages)
 		add(srv, "set_feed_filter", "Set Feed Filter", writeLocal,
 			"Choose what a get_new_messages consumer reads: chat_ids (some of the watched chats, [] for all) and direction "+
-				"(in: messages to this account, out: its own, both). The choice is saved for the consumer and also decides "+
+				"(in: messages to this account, out: its own, both). With watch_all on, a new consumer reads nothing until "+
+				"chat_ids is set here ([] chooses every chat on purpose). The choice is saved for the consumer and also decides "+
 				"what telegram-mcp watch --consumer announces. Omitted fields keep their value; pass only consumer to see "+
 				"the current filter. A new filter applies after the consumer's acknowledged cursor: acknowledged messages "+
 				"never come back, even ones the old filter skipped, so read those with list_messages.", s.setFeedFilter)
