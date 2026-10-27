@@ -122,3 +122,32 @@ func TestSecondOpenIsLocked(t *testing.T) {
 		t.Fatalf("second Open: got %v, want ErrLocked", err)
 	}
 }
+
+func TestOpenEscapesPath(t *testing.T) {
+	for _, dir := range []string{"with space", "hash#dir", "q?mark", "pct%41"} {
+		d := filepath.Join(t.TempDir(), dir)
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(d, "t.db")
+		db, err := Open(path)
+		if err != nil {
+			t.Errorf("%q: %v", dir, err)
+			continue
+		}
+		db.Close()
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%q: database not created at the given path", dir)
+		}
+		ro, err := OpenReadOnly(path)
+		if err != nil {
+			t.Errorf("%q read-only: %v", dir, err)
+			continue
+		}
+		var n int
+		if err := ro.QueryRow(`SELECT count(*) FROM sessions`).Scan(&n); err != nil {
+			t.Errorf("%q read-only query: %v", dir, err)
+		}
+		ro.Close()
+	}
+}

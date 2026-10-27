@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 
 	"github.com/gofrs/flock"
@@ -56,8 +57,8 @@ func Open(path string) (*DB, error) {
 		return nil, ErrLocked
 	}
 
-	db, err := sql.Open("sqlite", "file:"+path+
-		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	db, err := sql.Open("sqlite", fileURI(path,
+		"_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"))
 	if err != nil {
 		_ = lock.Unlock()
 		return nil, err
@@ -87,4 +88,27 @@ func (d *DB) Close() error {
 		err = uerr
 	}
 	return err
+}
+
+// OpenReadOnly opens the database for reading without the profile lock,
+// next to a running server: in WAL mode readers never block its writer.
+// The caller must not hold read transactions open between queries, or
+// the writer cannot checkpoint and the WAL file keeps growing.
+func OpenReadOnly(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", fileURI(path, "mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)"))
+	if err != nil {
+		return nil, err
+	}
+	// One connection: PRAGMA data_version is per connection, and callers
+	// compare successive values.
+	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
+// fileURI builds a file: URI with the path escaped. Plain "file:"+path
+// sent a path containing '#' or '?' to a different file without any
+// error, and failed on '%'.
+func fileURI(path, query string) string {
+	u := url.URL{Scheme: "file", Path: path, RawQuery: query}
+	return u.String()
 }

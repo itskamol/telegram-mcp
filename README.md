@@ -161,6 +161,36 @@ feed_retention_days = 7
 - Watching is read-only. Messages in the buffer are written by others:
   agents should not act on them without the user.
 
+### Waking an agent: `telegram-mcp watch`
+
+An MCP server cannot wake an idle agent; tools only run when called. A
+background command whose output the agent watches can (Claude Code's
+Monitor tool notifies on each line). `telegram-mcp watch` is that command:
+
+```bash
+telegram-mcp watch --consumer default
+```
+
+```json
+{"chat_id":-1004325193310,"first_id":1142,"last_id":1143,"count":2}
+```
+
+- One line per chat with new or edited messages: ids only, never message
+  text, so nothing private ends up in notifications or logs. The agent then
+  calls `get_new_messages(consumer, ack_cursor)` to read and acknowledge.
+- It never writes and never acknowledges; delivery guarantees stay with the
+  consumer's server-side offset. Messages left unacknowledged for
+  `--reannounce` (default 5m) are announced again in the same format, so an
+  agent that died mid-batch is woken again; unacknowledged messages from
+  before `watch` started are announced at once.
+- It reads the database read-only next to the running server, without the
+  profile lock, and holds no read transaction between checks, so the
+  server's WAL checkpoints are never blocked. It checks `PRAGMA
+  data_version` every `--interval` (default 500ms; about 3 µs of CPU per
+  check) and queries only when another process committed.
+- It waits for a database or feed tables that do not exist yet, reopens
+  the file if it is replaced, and exits when its output pipe closes.
+
 ## Safety settings
 
 All optional, in `config.toml`:
