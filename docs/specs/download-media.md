@@ -149,8 +149,14 @@ because those connections share the primary auth key.
   whose connection died before the server processed it
   (`errRetryableOnNewConn`). The pool as a whole only stops when the client's
   context ends or we call `Close`, i.e. at shutdown. So no replacement
-  logic; as a guard, an invoke error from a closed pool ("DC is closed")
-  drops the cache entry so a later download reopens it.
+  logic, and **no "DC is closed" guard** either (it was planned, then
+  dropped after checking gotd v0.163.0): a pool reports itself closed only
+  after `DC.Close` (`pool/pool.go`, `errDCIsClosed`), which only
+  `Service.Close` calls, or when the client's context ends (`DC closed`).
+  That context is cancelled only as `c.Run` returns (`connect.go`), and
+  from then on `createPool` refuses with "client already closed", so
+  dropping the entry to reopen it could never succeed. A guard would be
+  code with no reachable trigger, matching an unexported error string.
 
 This all runs in the **primary** process only. Relays (`internal/hub`) never
 open Telegram connections, so the one-process-per-profile rule holds.
