@@ -3,6 +3,7 @@ package tele
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"github.com/gotd/td/tgerr"
@@ -41,6 +42,9 @@ var hints = map[string]string{
 // Explain rewrites a Telegram RPC error into a sentence an agent can act
 // on. Other errors pass through unchanged.
 func Explain(err error) error {
+	if flood := (*FloodError)(nil); errors.As(err, &flood) {
+		return fmt.Errorf("Telegram rate limit: wait %d seconds before trying again [%s]", flood.Seconds, err)
+	}
 	rpc, ok := tgerr.As(err)
 	if !ok {
 		return err

@@ -9,9 +9,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 const (
@@ -88,10 +90,10 @@ type dcEntry struct {
 // opened on the home DC with the primary key.
 func (s *Service) fileAPI(ctx context.Context, dc int) (downloader.Client, error) {
 	if s.Pools == nil || dc == 0 {
-		return s.API, nil
+		return tg.NewClient(floodLimit{s.API.Invoker()}), nil
 	}
 	if home := s.Pools.Config().ThisDC; home == 0 || dc == home {
-		return s.API, nil
+		return tg.NewClient(floodLimit{s.API.Invoker()}), nil
 	}
 
 	c := &s.dcs
@@ -123,7 +125,7 @@ func (s *Service) fileAPI(ctx context.Context, dc int) (downloader.Client, error
 	if e.err != nil {
 		return nil, e.err
 	}
-	return tg.NewClient(e.pool), nil
+	return tg.NewClient(floodLimit{e.pool}), nil
 }
 
 // openDC opens dc's pool for e. A failure is not cached: the entry is
@@ -180,4 +182,29 @@ func (s *Service) Close() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// maxFloodSleep is the longest flood wait a download sleeps through, the
+// same limit as the client's flood waiter.
+const maxFloodSleep = time.Minute
+
+// FloodError is a flood wait too long to sleep through inside a download.
+// It is deliberately not a tgerr.Error, so gotd's downloader, which sleeps
+// through any FLOOD_WAIT it sees, gives up instead.
+type FloodError struct{ Seconds int }
+
+func (e *FloodError) Error() string { return fmt.Sprintf("flood wait of %d seconds", e.Seconds) }
+
+// floodLimit passes flood waits up to maxFloodSleep on to the downloader,
+// which sleeps and retries them, and turns longer ones into a FloodError.
+// It wraps both the pools, which bypass the client's middleware, and the
+// home connection, whose waiter returns long waits as the original error.
+type floodLimit struct{ next tg.Invoker }
+
+func (f floodLimit) Invoke(ctx context.Context, in bin.Encoder, out bin.Decoder) error {
+	err := f.next.Invoke(ctx, in, out)
+	if d, ok := tgerr.AsFloodWait(err); ok && d > maxFloodSleep {
+		return &FloodError{Seconds: int(d / time.Second)}
+	}
+	return err
 }

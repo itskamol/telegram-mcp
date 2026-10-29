@@ -21,7 +21,8 @@ const homeDC = 2
 // it, and answers past the end with no bytes; so every download test also
 // checks the part layout.
 type fileDC struct {
-	data []byte
+	data   []byte
+	floods map[int64]string // offset -> flood error type_seconds, answered once
 
 	mu       sync.Mutex
 	requests []*tg.UploadGetFileRequest
@@ -38,7 +39,12 @@ func (d *fileDC) Invoke(_ context.Context, in bin.Encoder, out bin.Decoder) erro
 		return fmt.Errorf("fileDC: unexpected %T", in)
 	}
 	d.requests = append(d.requests, req)
+	flood, isFlood := d.floods[req.Offset]
+	delete(d.floods, req.Offset)
 	d.mu.Unlock()
+	if isFlood {
+		return tgerr.New(420, flood)
+	}
 
 	if req.Limit != downloadPartSize {
 		return tgerr.New(400, "LIMIT_INVALID")
@@ -60,6 +66,17 @@ func (d *fileDC) Close() error {
 	defer d.mu.Unlock()
 	d.closed = true
 	return nil
+}
+
+// offsets returns how many times each offset was requested.
+func (d *fileDC) offsets() map[int64]int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := map[int64]int{}
+	for _, r := range d.requests {
+		n[r.Offset]++
+	}
+	return n
 }
 
 func (d *fileDC) calls() int {
