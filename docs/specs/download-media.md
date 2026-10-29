@@ -51,9 +51,22 @@ type Pools interface {
 }
 ```
 
-The home DC is read per download from `Config().ThisDC`, not stored once:
-a `*_MIGRATE` on the primary connection can move the account to another
-DC while the server runs.
+The home DC is read per download from `Config().ThisDC`. Where gotd
+writes it (v0.163.0): `client.go` starts with an empty `tg.Config`
+(`ThisDC == 0`); `onSession` (`session.go`) stores the config each time the
+primary connection is established, including after `migrateToDc`, which
+restarts the primary on the new DC; `fetchConfig` (`cfg.go`) stores it again
+on `updateConfig`. So the value does follow a migration. In practice the
+home DC of a logged-in account does not change (`USER_MIGRATE` comes during
+login, `PHONE_MIGRATE`/`NETWORK_MIGRATE` before or around it); reading it
+per download is a cheap guard, not something the design relies on.
+
+**`ThisDC == 0`** (config not loaded yet) is treated like an unknown file
+DC: the home connection is used and no pool is opened. Otherwise every file
+would look "not home", and a file on the home DC would get a pool with an
+auth transfer to the account's own DC. In `serve` this cannot happen, since
+`Service` is built after `c.Self` succeeded, but the rule does not depend
+on that.
 
 `Service` keeps a cache of opened DC pools (`map[int]*dcEntry` behind a
 mutex), closed by `Service.Close`. `c.DC` exports and imports the
@@ -67,7 +80,7 @@ Routing:
 | --- | --- | --- |
 | home DC | `s.API` (the existing connection) | MTProto pipelines many in-flight requests on one connection, so the concurrent requests still overlap. No extra connection on the primary auth key, which keeps us clear of anything that could look like `AUTH_KEY_DUPLICATED`. **This is a hypothesis:** one TCP connection still has one congestion window and possibly a server-side per-connection limit, so 8 concurrent requests may not give 8× here. The benchmark measures exactly this path, and the commit message says it is a hypothesis. |
 | other DC | cached `Pools.DC(ctx, dc, downloadConcurrency)` | Requests go straight to the DC that has the file: no `FILE_MIGRATE`, one round trip per part. The pool uses the DC's exported key, not the primary one. |
-| `DC == 0` (unknown) | `s.API` | Same as today; gotd's migrate handling still works. |
+| `DC == 0` (unknown), or home DC unknown (`ThisDC == 0`) | `s.API` | Same as today; gotd's migrate handling still works. |
 
 **Pool size = number of concurrent requests.** A gotd `pool.DC` connection carries one request
 at a time: `acquire` takes it off the free list and `release` returns it only
@@ -346,7 +359,12 @@ added, and both paths share the invoker selection and flood wrapper.
   closed", `Pools.DC` not called.
 - A fake `Pools.DC` that panics → waiters get an error, none hangs (test
   with a timeout).
-- Requests use `limit = 1 MB` and offsets that are multiples of 1 MB.
+- Requests use `limit = 1 MB` and offsets that are multiples of 1 MB:
+  checked in every download test by the fake DC itself, which answers
+  `LIMIT_INVALID` / `OFFSET_INVALID` like Telegram and serves no bytes past
+  the end.
+- Pool opened with `max == downloadConcurrency`; `ThisDC == 0` → home
+  connection, no pool.
 - `FLOOD_WAIT_3` is retried; `FLOOD_WAIT_120` fails fast with a rate-limit
   message (no sleep: test runs with a short context).
 - `FILE_REFERENCE_EXPIRED` → refetch called once, download succeeds; twice →
