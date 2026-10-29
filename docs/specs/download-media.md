@@ -116,9 +116,13 @@ because those connections share the primary auth key.
 - **One opening per DC.** The cache entry is created under the mutex with a
   `done` channel before the mutex is released; concurrent first requests
   for the same DC wait on that channel. (Plain mutex + channel; no new
-  dependency for `singleflight`.) The opener goroutine closes `done` in a
-  `defer`, so a panic or an early return can never leave waiters hanging;
-  a recovered panic becomes the entry's error.
+  dependency for `singleflight`.) The opening runs in **its own goroutine**,
+  never the caller's: the caller only waits, so its cancellation or an MCP
+  handler that recovers a panic in it cannot leave `done` open. The opener
+  closes `done` in a `defer`, which covers errors and early returns. A
+  panic in the opener is **not** recovered: in a goroutine of its own it
+  stops the process, which is the right outcome for a bug, and nobody is
+  left waiting. Turning it into an error would hide the bug.
 - **`Close` vs. an opening in progress.** An opener may still be inside
   `c.DC` (up to 30 s) when `Service.Close` runs. If `Close` just closed the
   pools it found, the opener would then store a fresh pool in a cache nobody
@@ -221,7 +225,12 @@ the write loop never calls `WriteAt` with an empty slice. A chunk shorter
 than `partSize` is written and then stops the download. For a file of
 exactly N MB, the last full part is written normally and the following
 offset comes back empty and is dropped. Requests already in flight past the
-end also come back empty and are dropped: a few wasted requests, no writes.
+end also come back empty and are dropped: a few wasted requests, no writes
+(up to `downloadConcurrency − 1` per download; 7 of 8 for a one-part file).
+Not optimised (YAGNI). That Telegram answers an offset at or past the end
+with empty bytes rather than `OFFSET_INVALID` is an **assumption** the test
+fake encodes, not something checked against the server: the first
+measurement run verifies it (see the measurement plan).
 A short chunk in the middle of a file (which Telegram should never send)
 would fail the "short only at the end" rule above instead of passing
 silently.
@@ -357,8 +366,8 @@ added, and both paths share the invoker selection and flood wrapper.
   the fake hands back is closed (the fake records `Close`), and the waiting
   caller gets "service closed". A `pool()` call after `Close` → "service
   closed", `Pools.DC` not called.
-- A fake `Pools.DC` that panics → waiters get an error, none hangs (test
-  with a timeout).
+- A slow opening on one DC does not hold up a download from another DC
+  (no lock held across `Pools.DC`).
 - Requests use `limit = 1 MB` and offsets that are multiples of 1 MB:
   checked in every download test by the fake DC itself, which answers
   `LIMIT_INVALID` / `OFFSET_INVALID` like Telegram and serves no bytes past
@@ -609,7 +618,8 @@ Setup (approved by the user; it edits their `config.toml`):
 1. Save a copy of `config.toml` (in the scratch dir, not the repo), then
    temporarily set `max_upload_mb = 200` and `max_download_mb = 200`.
 2. In the first `allowed_roots` dir, create `bench-150mb.bin` (150 MB) and
-   `bench-30mb.bin` (30 MB) from `/dev/urandom` (random data, so nothing
+   `bench-30mb.bin` (30 MB, not a multiple of 1 MiB) and `bench-8mb.bin`
+   (exactly 8 MiB) from `/dev/urandom` (random data, so nothing
    compresses and nothing private is uploaded).
 3. `send_file` each to `me` with `as_document: true`; write down both
    message ids. These are the only messages the test creates.
@@ -619,6 +629,14 @@ includes client overhead). Commit 1 adds one stderr line per download at
 the end: `download done dc=… concurrency=… bytes=… elapsed=…` (no path, no
 chat content, nothing secret). `main` has no such line, so for the baseline
 the same line is added in a local, uncommitted build.
+
+**First check, before any timing:** download the 30 MB test file once
+with commit 1 and confirm it completes. The file ends mid-part, and the
+other request goroutines ask for offsets past the end; if Telegram answers
+those with `OFFSET_INVALID` instead of empty bytes, every parallel download
+fails, and the end-of-file handling must change before measuring anything.
+Then the same for a file of exactly N MB (`bench-8mb.bin`, 8 MiB), whose
+end is found only through an empty answer.
 
 Runs, one `serve` primary at a time, restarting it between builds:
 
