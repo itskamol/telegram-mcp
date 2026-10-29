@@ -1,6 +1,10 @@
 # Spec: fast `download_media` that can outlive one tool call
 
-Status: approved. Nothing here is implemented yet.
+Status: implemented on `main` (commits up to 72585ec). Where the code
+differs from this text, the sections say so under *As built*. Still open:
+a hub test for two relays sharing one job, a `kill -9` check of the crash
+cleanup in the real app, a live test with a file on another DC, and the
+ABAB baseline against 0.8.0.
 
 ## Problem
 
@@ -708,4 +712,7 @@ message, together with the home-DC hypothesis and whether it held.
    to 200 in `config.toml` (approved by the user); cleanup verifies the
    original is restored.
 
-Status: reviewed and approved. Implementation is a separate step.
+Live results so far (all files on the home DC 2): a 73 MiB file in 19 s
+within one call; exactly-8 MiB and 8 MiB + 123 B files byte-identical,
+confirming the empty answer past the end; a 417 MiB file in background mode
+over three calls, about 2 minutes (~3.5 MiB/s).
