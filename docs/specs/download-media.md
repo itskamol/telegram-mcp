@@ -1,6 +1,6 @@
 # Spec: fast `download_media` that can outlive one tool call
 
-Status: draft, waiting for review. Nothing here is implemented yet.
+Status: approved. Nothing here is implemented yet.
 
 ## Problem
 
@@ -521,8 +521,8 @@ message, together with the home-DC hypothesis and whether it held.
    root dirs alone would miss `.part` files, and a recursive sweep of a large
    root (e.g. `~`) is expensive.
 
-## Open question
+5. The measurement may temporarily raise `max_upload_mb`/`max_download_mb`
+   to 200 in `config.toml` (approved by the user); cleanup verifies the
+   original is restored.
 
-5. May the measurement temporarily raise `max_upload_mb`/`max_download_mb`
-   to 200 in `config.toml`? (The user's call; cleanup verifies the original
-   is restored either way.)
+Status: reviewed and approved. Implementation is a separate step.
