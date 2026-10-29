@@ -1,10 +1,13 @@
 package tele
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"sync"
+	"time"
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/downloader"
@@ -49,6 +52,35 @@ func (s *Service) DownloadFile(ctx context.Context, f MediaFile, w PartSink,
 	return nil
 }
 
+// poolOpenTimeout bounds one pool opening (dial and auth transfer).
+const poolOpenTimeout = 30 * time.Second
+
+var errServiceClosed = errors.New("service closed")
+
+// dcCache holds the pools opened to other DCs, one per DC.
+//
+// An opening runs in its own goroutine, on a context of its own, never the
+// caller's: a caller that gives up only stops waiting, and the opening
+// still serves everyone else waiting for that DC. No lock is held while a
+// DC is being opened, so a slow handshake holds up only its own DC.
+type dcCache struct {
+	base context.Context // parent of every opening; the client's run context
+
+	mu      sync.Mutex
+	entries map[int]*dcEntry
+	closed  bool
+	cancel  context.CancelFunc // cancels every opening; set with ctx
+	ctx     context.Context
+	openers sync.WaitGroup
+}
+
+// dcEntry is one DC's pool, or its opening while done is open.
+type dcEntry struct {
+	done chan struct{}
+	pool telegram.CloseInvoker // set when done closes, unless err is
+	err  error
+}
+
 // fileAPI returns the client to fetch a file stored on dc. Files on other
 // DCs go straight to a pool there: through the home connection every part
 // would first be refused with FILE_MIGRATE. While the home DC is unknown
@@ -62,30 +94,90 @@ func (s *Service) fileAPI(ctx context.Context, dc int) (downloader.Client, error
 		return s.API, nil
 	}
 
-	s.poolMu.Lock()
-	defer s.poolMu.Unlock()
-	if p, ok := s.pools[dc]; ok {
-		return tg.NewClient(p), nil
+	c := &s.dcs
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, errServiceClosed
 	}
-	p, err := s.Pools.DC(ctx, dc, downloadConcurrency)
-	if err != nil {
-		return nil, fmt.Errorf("connect to DC %d: %w", dc, err)
+	e, ok := c.entries[dc]
+	if !ok {
+		if c.ctx == nil {
+			c.ctx, c.cancel = context.WithCancel(cmp.Or(c.base, context.Background()))
+		}
+		if c.entries == nil {
+			c.entries = map[int]*dcEntry{}
+		}
+		e = &dcEntry{done: make(chan struct{})}
+		c.entries[dc] = e
+		c.openers.Add(1)
+		go s.openDC(dc, e)
 	}
-	if s.pools == nil {
-		s.pools = map[int]telegram.CloseInvoker{}
+	c.mu.Unlock()
+
+	select {
+	case <-e.done:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	s.pools[dc] = p
-	return tg.NewClient(p), nil
+	if e.err != nil {
+		return nil, e.err
+	}
+	return tg.NewClient(e.pool), nil
 }
 
-// Close closes the DC pools opened for downloads.
+// openDC opens dc's pool for e. A failure is not cached: the entry is
+// dropped, so the next download tries again. A pool that arrives after
+// Close is closed here, since Close has already collected the others.
+func (s *Service) openDC(dc int, e *dcEntry) {
+	c := &s.dcs
+	defer c.openers.Done()
+	defer close(e.done) // after the fields below are set, on every path
+
+	ctx, cancel := context.WithTimeout(c.ctx, poolOpenTimeout)
+	defer cancel()
+	pool, err := s.Pools.DC(ctx, dc, downloadConcurrency)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case err != nil:
+		e.err = fmt.Errorf("connect to DC %d: %w", dc, err)
+		delete(c.entries, dc)
+	case c.closed:
+		e.err = errors.Join(errServiceClosed, pool.Close())
+	default:
+		e.pool = pool
+	}
+}
+
+// Close cancels the openings still running, waits for them, and closes
+// every pool. Nothing opens after it.
 func (s *Service) Close() error {
-	s.poolMu.Lock()
-	defer s.poolMu.Unlock()
+	c := &s.dcs
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	if c.cancel != nil {
+		c.cancel()
+	}
+	c.mu.Unlock()
+
+	// No opener starts once closed is set, so Wait cannot miss one.
+	c.openers.Wait()
+
+	c.mu.Lock()
+	entries := c.entries
+	c.entries = nil
+	c.mu.Unlock()
 	var errs []error
-	for dc, p := range s.pools {
-		errs = append(errs, p.Close())
-		delete(s.pools, dc)
+	for _, e := range entries {
+		if e.pool != nil {
+			errs = append(errs, e.pool.Close())
+		}
 	}
 	return errors.Join(errs...)
 }

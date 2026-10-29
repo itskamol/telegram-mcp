@@ -9,10 +9,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/gotd/td/constant"
-	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 
 	"github.com/itskamol/telegram-mcp-go/internal/sanitize"
@@ -25,9 +23,8 @@ type Service struct {
 	// Pools reaches other DCs for downloads; nil downloads via API only.
 	Pools Pools
 
-	poolMu sync.Mutex
-	pools  map[int]telegram.CloseInvoker // open DC pools, by DC
-	Peers  *storage.Peers
+	dcs   dcCache // DC pools opened for downloads, see download.go
+	Peers *storage.Peers
 	// SelfID and Me describe the logged-in account; set once at startup.
 	SelfID int64
 	Me     Me
@@ -43,6 +40,7 @@ type Me struct {
 func NewService(ctx context.Context, api *tg.Client, peers *storage.Peers, self *tg.User) (*Service, error) {
 	s := &Service{API: api, Peers: peers, SelfID: self.ID,
 		Me: Me{Name: sanitize.Name(userName(self)), Username: self.Username}}
+	s.dcs.base = ctx
 	return s, s.cache(ctx, []tg.UserClass{self}, nil)
 }
 
