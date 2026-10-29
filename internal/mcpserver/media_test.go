@@ -38,6 +38,7 @@ type fakeTelegram struct {
 	gate    chan struct{} // if set, getFile waits until it is closed
 	fail    error         // if set, the next getFile fails with it, once
 	upGate  chan struct{} // if set, upload parts wait until it is closed
+	upFree  int           // this many parts pass before upGate applies
 	sendErr error         // if set, the next messages.sendMedia fails with it, once
 
 	mu        sync.Mutex
@@ -81,7 +82,13 @@ func (f *fakeTelegram) Invoke(ctx context.Context, in bin.Encoder, out bin.Decod
 		end := min(start+int64(req.Limit), int64(len(f.data)))
 		reply = &tg.UploadFile{Type: &tg.StorageFilePartial{}, Bytes: f.data[start:end]}
 	case *tg.UploadSaveFilePartRequest, *tg.UploadSaveBigFilePartRequest:
-		if f.upGate != nil {
+		f.mu.Lock()
+		free := f.upFree > 0
+		if free {
+			f.upFree--
+		}
+		f.mu.Unlock()
+		if f.upGate != nil && !free {
 			select {
 			case <-f.upGate:
 			case <-ctx.Done():
@@ -576,11 +583,14 @@ func pollSent(t *testing.T, s *Server, key string) sentOut {
 // audit line, at the end.
 func TestSendFileInBackground(t *testing.T) {
 	s, home, _ := uploadServer(t)
-	home.upGate = make(chan struct{})
+	home.upGate, home.upFree = make(chan struct{}), 2
 
 	first, err := sendUp(t, s, "")
 	if err != nil || first.Status != "uploading" || first.Size != 3<<20 {
 		t.Fatalf("first call = %+v, %v; want uploading with the size", first, err)
+	}
+	if first.Uploaded != 2*512<<10 {
+		t.Errorf("uploaded = %d, want the 2 parts that got through (%d)", first.Uploaded, 2*512<<10)
 	}
 	if !strings.Contains(first.Next, "send_file") || !strings.Contains(strings.ToLower(first.Next), "same") {
 		t.Errorf("next = %q, want it to say: call send_file again with the same arguments", first.Next)
