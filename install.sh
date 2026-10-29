@@ -1,15 +1,15 @@
 #!/bin/sh
 # Install telegram-mcp from GitHub Releases.
 #
-#   curl -fsSL https://raw.githubusercontent.com/itskamol/telegram-mcp-go/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/itskamol/telegram-mcp/main/install.sh | sh
 #
 # Environment:
 #   VERSION=v0.2.0       install this release instead of the latest
 #   BIN_DIR=/usr/local/bin   install here instead of ~/.local/bin
 set -eu
 
-REPO="itskamol/telegram-mcp-go"
-PROJECT="telegram-mcp-go"
+REPO="itskamol/telegram-mcp"
+MODULE="github.com/itskamol/telegram-mcp-go"
 BIN="telegram-mcp"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 
@@ -29,7 +29,7 @@ case "$(uname -s)/$(uname -m)" in
   Linux/aarch64 | Linux/arm64) os=linux arch=arm64 ;;
   *) die "no release binary for $(uname -s)/$(uname -m).
 Build from source with Go 1.26+:
-  go install github.com/$REPO/cmd/$BIN@latest" ;;
+  go install $MODULE/cmd/$BIN@latest" ;;
 esac
 
 if [ -z "${VERSION:-}" ]; then
@@ -38,17 +38,28 @@ if [ -z "${VERSION:-}" ]; then
   case "$VERSION" in v*) ;; *) die "could not find the latest release" ;; esac
 fi
 
-archive="${PROJECT}_${VERSION#v}_${os}_${arch}.tar.gz"
 base="https://github.com/$REPO/releases/download/$VERSION"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 say "Downloading $BIN $VERSION for $os/$arch..."
-curl -fsSL -o "$tmp/$archive" "$base/$archive" || die "download failed: $base/$archive"
-curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt" || die "checksums.txt download failed"
+curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt" || die "checksums.txt download failed: $base/checksums.txt"
 
+# Archives are named after the project: telegram-mcp from v0.9.0 on,
+# telegram-mcp-go before the repository was renamed. checksums.txt lists
+# the one this release has.
+archive=""
+for project in telegram-mcp telegram-mcp-go; do
+  name="${project}_${VERSION#v}_${os}_${arch}.tar.gz"
+  if awk -v f="$name" '$2 == f { found = 1 } END { exit !found }' "$tmp/checksums.txt"; then
+    archive=$name
+    break
+  fi
+done
+[ -n "$archive" ] || die "release $VERSION has no archive for $os/$arch"
+
+curl -fsSL -o "$tmp/$archive" "$base/$archive" || die "download failed: $base/$archive"
 want=$(awk -v f="$archive" '$2 == f { print $1 }' "$tmp/checksums.txt")
-[ -n "$want" ] || die "$archive is not listed in checksums.txt"
 if command -v sha256sum >/dev/null 2>&1; then
   got=$(sha256sum "$tmp/$archive" | awk '{print $1}')
 else

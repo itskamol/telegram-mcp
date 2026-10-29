@@ -1,5 +1,9 @@
 version: 2
 
+# Archive names come from this, not from the repository name: the rename
+# from telegram-mcp-go changed them silently and broke install.sh.
+project_name: telegram-mcp
+
 builds:
   - id: telegram-mcp
     main: ./cmd/telegram-mcp

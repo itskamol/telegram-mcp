@@ -14,7 +14,7 @@ Release binaries are built for **Apple Silicon Macs** (darwin/arm64) and
 **Linux** (amd64, arm64).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/itskamol/telegram-mcp-go/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/itskamol/telegram-mcp/main/install.sh | sh
 ```
 
 It downloads the latest release, verifies its SHA-256
