@@ -36,6 +36,23 @@ On Linux the session key is kept in the Secret Service (GNOME Keyring,
 KWallet) over D-Bus, so a desktop session or a running keyring daemon is
 needed; on a headless server `login` fails until one is available.
 
+### Update
+
+```bash
+telegram-mcp update           # to the latest release
+telegram-mcp update --check   # only say whether there is one
+telegram-mcp update --version v0.9.1   # a given release, also older
+```
+
+It downloads the release for this OS and CPU, checks it against
+`checksums.txt`, and replaces the binary in place. Then restart the MCP
+clients that use it (Claude Desktop, Claude Code sessions) and any
+`telegram-mcp watch`: a server keeps running its old binary until then,
+and a relay of a new version does not talk to a server of an older one.
+Installed with Homebrew, update with `brew upgrade --cask telegram-mcp`
+instead; `update` says so and leaves the file alone. Before `update`
+existed (0.9.2 and older), rerun the `install.sh` line above.
+
 Intel Macs and Windows: build from source (Go 1.26+):
 
 ```bash
