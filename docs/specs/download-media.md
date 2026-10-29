@@ -1,10 +1,10 @@
 # Spec: fast `download_media` that can outlive one tool call
 
-Status: implemented on `main` (commits up to 72585ec). Where the code
-differs from this text, the sections say so under *As built*. Still open:
-a hub test for two relays sharing one job, a `kill -9` check of the crash
-cleanup in the real app, a live test with a file on another DC, and the
-ABAB baseline against 0.8.0.
+Status: implemented on `main`. Where the code differs from this text, the
+sections say so under *As built*; the home-DC pool (section 1.1) was added
+after measurement. Still open: a hub test for two relays sharing one job,
+a `kill -9` check of the crash cleanup in the real app, a live test with a
+file on another DC, and an ABAB baseline against 0.8.0.
 
 ## Problem
 
@@ -47,10 +47,11 @@ The tool's inputs and outputs do not change.
 `Service` gets one new dependency, kept as a small interface so tests can fake it:
 
 ```go
-// Pools opens connections to other DCs and reports the home DC;
-// *telegram.Client satisfies it.
+// Pools opens connections to other DCs and to the home DC, and reports
+// the home DC; *telegram.Client satisfies it.
 type Pools interface {
 	DC(ctx context.Context, dc int, max int64) (telegram.CloseInvoker, error)
+	Pool(max int64) (telegram.CloseInvoker, error)
 	Config() tg.Config
 }
 ```
@@ -82,7 +83,7 @@ Routing:
 
 | File DC | Invoker | Why |
 | --- | --- | --- |
-| home DC | `s.API` (the existing connection) | MTProto pipelines many in-flight requests on one connection, so the concurrent requests still overlap. No extra connection on the primary auth key, which keeps us clear of anything that could look like `AUTH_KEY_DUPLICATED`. **This is a hypothesis:** one TCP connection still has one congestion window and possibly a server-side per-connection limit, so 8 concurrent requests may not give 8× here. The benchmark measures exactly this path, and the commit message says it is a hypothesis. |
+| home DC | *As built:* a cached `Pools.Pool(downloadConcurrency)` (`telegram.Client.Pool`), opened, cached and closed like the other DC pools; if it cannot be opened, `s.API` for that download | The first version used `s.API` (8 requests pipelined on one connection) on the hypothesis that this was enough. Measurement disproved it: Telegram limits each connection. Same 73 MiB file, alternated runs: one connection, 8 in flight, median 18.7–25.7 s; 16 in flight, 26.2 s (no gain); a pool of 8 connections, 13.4 s (1.4–2.4× faster, steadier). A 417 MiB file: 1m21s against 1m50s–1m59s. The pool's connections use the primary auth key with sessions of their own: gotd gives every new connection a random session id (`mtproto/connect.go`), as official apps do. No `AUTH_KEY_DUPLICATED` or other session error appeared in the live runs. |
 | other DC | cached `Pools.DC(ctx, dc, downloadConcurrency)` | Requests go straight to the DC that has the file: no `FILE_MIGRATE`, one round trip per part. The pool uses the DC's exported key, not the primary one. |
 | `DC == 0` (unknown), or home DC unknown (`ThisDC == 0`) | `s.API` | Same as today; gotd's migrate handling still works. |
 
@@ -99,9 +100,8 @@ to one DC stays fixed at 8 no matter how many downloads run, which keeps the
 footprint predictable and away from flood limits. Do not "fix" it with a
 pool per job.
 
-If measurement (below) shows the home DC is the bottleneck, `c.Pool(n)` for the
-home DC is a later, separate change, tried live in Saved Messages first,
-because those connections share the primary auth key.
+The home-DC pool was first tried live in Saved Messages with a throwaway
+build, as planned, before it was written test-first.
 
 #### Pool lifecycle (checked in gotd v0.163.0 source)
 
@@ -695,7 +695,8 @@ message, together with the home-DC hypothesis and whether it held.
 - No new tool (no `download_status` / `cancel_download`).
 - No resume across restarts (would need a persisted part map).
 - No CDN (`WithAllowCDN`) — separate change if measurement shows redirects.
-- No home-DC connection pool unless measurement shows it is needed.
+- ~~No home-DC connection pool unless measurement shows it is needed.~~
+  Measurement showed it is: see the home-DC row in 1.1.
 
 ## Review decisions
 
@@ -715,4 +716,6 @@ message, together with the home-DC hypothesis and whether it held.
 Live results so far (all files on the home DC 2): a 73 MiB file in 19 s
 within one call; exactly-8 MiB and 8 MiB + 123 B files byte-identical,
 confirming the empty answer past the end; a 417 MiB file in background mode
-over three calls, about 2 minutes (~3.5 MiB/s).
+over three calls, about 2 minutes (~3.5 MiB/s). With the home-DC pool: the
+73 MiB file in 13.0–13.8 s, the 417 MiB file in 1m21s over two calls
+(~5.1 MiB/s).
