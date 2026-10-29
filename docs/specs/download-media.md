@@ -164,12 +164,35 @@ downloader.NewDownloader().WithPartSize(1 << 20).
 Add a sibling and keep `WriteNew` for other callers:
 
 ```go
+// ErrBadPart means a WriteAt did not fit the part layout: misaligned,
+// short before the end, past the end, or a part written twice.
+var ErrBadPart = errors.New("download part does not fit the file")
+
+// ErrIncomplete means write returned without filling every part.
+var ErrIncomplete = errors.New("download is incomplete")
+
+// PartWriter is the io.WriterAt that WriteNewAt hands to write.
+type PartWriter struct{ /* temp file, size, partSize, bitmap, written, err */ }
+
+func (w *PartWriter) WriteAt(p []byte, off int64) (int, error)
+func (w *PartWriter) Written() int64 // bytes accepted so far (progress)
+func (w *PartWriter) Reset() error   // truncate, clear bitmap and written (1.5)
+
 // WriteNewAt is WriteNew for writers that fill the file out of order, in
 // parts of partSize bytes. size is the exact expected length and must be
 // > 0; a size above limit fails before anything is created. The file is
 // kept only if every part was written exactly once.
-func WriteNewAt(dir, name string, size, limit, partSize int64, write func(io.WriterAt) error) (string, error)
+func WriteNewAt(dir, name string, size, limit, partSize int64, write func(*PartWriter) error) (string, error)
 ```
+
+A refused `WriteAt` is **sticky**: the first `ErrBadPart` is remembered and
+`WriteNewAt` returns it even if `write` swallowed it and returned nil. A
+refused write means the downloader and the file layout disagree, and that
+must never end in a kept file.
+
+`tele` does not import `fsguard`; `Service.DownloadFile` takes the small
+interface it needs (`interface{ io.WriterAt; Reset() error }`), which
+`*fsguard.PartWriter` satisfies.
 
 How gotd ends a parallel download (`downloader/parallel.go`, `reader.go`,
 `sink.go`, v0.163.0): each request goroutine takes the next offset
@@ -214,8 +237,12 @@ So the pooled invoker is wrapped in a small `floodLimit` invoker:
 - **> 60 s** is turned into a `*tele.FloodError{Seconds}` that is *not* a
   `tgerr.Error`, so gotd does not sleep; the download fails and `Explain`
   says "Telegram rate limit: wait N seconds".
-- The home-DC path already goes through the waiter (same behaviour) and the
-  same wrapper is applied there too, so both paths are identical.
+- The home-DC path goes through the client's waiter, which sleeps waits
+  ≤ 60 s but **returns** longer ones as the original `FLOOD_WAIT` error, which
+  gotd's downloader would then sleep through. So the same `floodLimit`
+  wrapper sits on top there too (`floodLimit(s.API's invoker)`), between the
+  downloader and the waiter. Both paths then behave the same: ≤ 60 s slept,
+  > 60 s fails.
 
 Every sleep is still bounded by the context (tool call or, in commit 2, job).
 
@@ -239,9 +266,15 @@ This means `Service.Download` takes the chat + message (or a refetch
 callback) instead of a bare location; the new signature:
 
 ```go
+// PartSink is where DownloadFile writes; Reset empties it for a restart.
+type PartSink interface {
+	io.WriterAt
+	Reset() error
+}
+
 // DownloadFile writes f to w in parallel on f's DC. refetch reloads the
 // message when the file reference expired.
-func (s *Service) DownloadFile(ctx context.Context, f MediaFile, w io.WriterAt,
+func (s *Service) DownloadFile(ctx context.Context, f MediaFile, w PartSink,
 	refetch func(context.Context) (MediaFile, error)) error
 ```
 
@@ -262,7 +295,10 @@ added, and both paths share the invoker selection and flood wrapper.
 - A write ending past `limit` → `ErrTooLarge`, no final file, no `.part`
   left in `dir`.
 - `size` above `limit` → `ErrTooLarge` before any file is created.
-- Final length ≠ `size` → error, nothing left behind.
+- Last part never written (file shorter than `size`) → `ErrIncomplete`,
+  nothing left behind.
+- A refused `WriteAt` that `write` swallows (returns nil) → `WriteNewAt`
+  still returns `ErrBadPart`, nothing left behind.
 - **Hole:** all parts except one middle part are written (so the length is
   right and the file is sparse) → error, nothing left behind.
 - Misaligned offset, wrong part length, and the same part written twice →
@@ -404,7 +440,10 @@ session start two copies of the same file.
   round, the `canceled` line goes to a closed file and is lost silently, and
   the row stays in a closed DB, so the next start sweeps a `.part` that is
   already gone. Step 2 has a 10 s limit: a job stuck past it is logged to
-  stderr and abandoned; its row stays, so the next start's sweep handles it.
+  stderr and abandoned. This is the one accepted exception to the order:
+  its late audit and DB writes may hit closed handles and fail (logged to
+  stderr, not lost silently), and its row stays, so the next start's sweep
+  removes its `.part`.
 - **Server killed** (`kill -9`, crash, power loss): the deferred cleanup
   never runs. To not leave `.part` files behind, each job records its temp
   path in a new `partial_downloads(path TEXT PRIMARY KEY, started INTEGER)`
