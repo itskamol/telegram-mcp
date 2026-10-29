@@ -36,6 +36,8 @@ type MediaInfo struct {
 type MediaFile struct {
 	Info     MediaInfo
 	Location tg.InputFileLocationClass
+	// DC is the data center that stores the file; 0 if unknown.
+	DC int
 	// photo is set for photos, to pick a smaller size for previews.
 	photo *tg.Photo
 }

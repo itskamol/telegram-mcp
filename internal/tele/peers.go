@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gotd/td/constant"
+	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 
 	"github.com/itskamol/telegram-mcp-go/internal/sanitize"
@@ -19,8 +21,13 @@ import (
 
 // Service is the Telegram side of the tools.
 type Service struct {
-	API   *tg.Client
-	Peers *storage.Peers
+	API *tg.Client
+	// Pools reaches other DCs for downloads; nil downloads via API only.
+	Pools Pools
+
+	poolMu sync.Mutex
+	pools  map[int]telegram.CloseInvoker // open DC pools, by DC
+	Peers  *storage.Peers
 	// SelfID and Me describe the logged-in account; set once at startup.
 	SelfID int64
 	Me     Me
