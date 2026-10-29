@@ -83,9 +83,20 @@ func (s *Server) downloadMedia(ctx context.Context, _ *mcp.CallToolRequest, in d
 
 	// The original name comes from the sender, so it is sanitized too.
 	name := fsguard.SafeName(cmp.Or(in.FileName, f.DefaultName()), "telegram_file")
-	path, err := fsguard.WriteNew(dir, name, s.policy.MaxDownload, func(w io.Writer) error {
-		return s.svc.Download(ctx, f.Location, w)
-	})
+	var path string
+	if f.Info.Size > 0 {
+		// Parts arrive out of order; the file is kept only if all of them came.
+		refetch := func(ctx context.Context) (tele.MediaFile, error) {
+			return s.media(ctx, mediaIn{Chat: in.Chat, MessageID: in.MessageID})
+		}
+		path, err = fsguard.WriteNewAt(dir, name, f.Info.Size, s.policy.MaxDownload, tele.DownloadPartSize,
+			func(w *fsguard.PartWriter) error { return s.svc.DownloadFile(ctx, f, w, refetch) })
+	} else {
+		// Unknown size: stream in order, bounded by the limit as it grows.
+		path, err = fsguard.WriteNew(dir, name, s.policy.MaxDownload, func(w io.Writer) error {
+			return s.svc.Download(ctx, f.DC, f.Location, w)
+		})
+	}
 	if errors.Is(err, fsguard.ErrTooLarge) {
 		err = fmt.Errorf("file is larger than max_download_mb (%d MB)", s.policy.MaxDownload>>20)
 	}
@@ -109,7 +120,7 @@ func (s *Server) viewPhoto(ctx context.Context, _ *mcp.CallToolRequest, in media
 	}
 
 	buf := &fsguard.LimitedBuffer{Limit: previewMaxBytes}
-	if err := s.svc.Download(ctx, loc, buf); err != nil {
+	if err := s.svc.Download(ctx, f.DC, loc, buf); err != nil {
 		if errors.Is(err, fsguard.ErrTooLarge) {
 			return nil, nil, errors.New("image is too large to show; use download_media")
 		}

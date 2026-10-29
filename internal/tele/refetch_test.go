@@ -28,7 +28,7 @@ type refetchFixture struct {
 
 func newRefetchFixture() *refetchFixture {
 	data := fileData(2<<20 + 512<<10)
-	dc := &fileDC{data: data, expired: oldRef, expiredFrom: downloadPartSize}
+	dc := &fileDC{data: data, expired: oldRef, expiredFrom: DownloadPartSize}
 	pools := &fakePools{dcs: map[int]*fileDC{4: dc}, this: homeDC}
 	return &refetchFixture{
 		data: data,

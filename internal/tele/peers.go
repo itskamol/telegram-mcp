@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -23,7 +24,9 @@ type Service struct {
 	// Pools reaches other DCs for downloads; nil downloads via API only.
 	Pools Pools
 
-	dcs   dcCache // DC pools opened for downloads, see download.go
+	dcs dcCache // DC pools opened for downloads, see download.go
+	// Log gets one line per finished download; nil logs nothing.
+	Log   *slog.Logger
 	Peers *storage.Peers
 	// SelfID and Me describe the logged-in account; set once at startup.
 	SelfID int64

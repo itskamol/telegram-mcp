@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	// downloadPartSize is the largest part upload.getFile serves.
-	downloadPartSize = 1 << 20
+	// DownloadPartSize is the largest part upload.getFile serves.
+	DownloadPartSize = 1 << 20
 	// downloadConcurrency is the number of parts requested at once. A DC
 	// pool connection carries one request at a time, so pools have exactly
 	// this many connections.
@@ -47,6 +47,18 @@ type PartSink interface {
 // w.Reset ends the download: it means a write of the first attempt is still
 // running, which is a bug, not something to wait out.
 func (s *Service) DownloadFile(ctx context.Context, f MediaFile, w PartSink,
+	refetch func(context.Context) (MediaFile, error)) error {
+	start := time.Now()
+	err := s.download(ctx, f, w, refetch)
+	if err == nil && s.Log != nil {
+		// For the measurement plan; nothing about the file or the chat.
+		s.Log.Info("download done", "dc", f.DC, "concurrency", downloadConcurrency,
+			"bytes", f.Info.Size, "elapsed", time.Since(start).Round(time.Millisecond))
+	}
+	return err
+}
+
+func (s *Service) download(ctx context.Context, f MediaFile, w PartSink,
 	refetch func(context.Context) (MediaFile, error)) error {
 	err := s.downloadOnce(ctx, f, w)
 	if !tgerr.Is(err, "FILE_REFERENCE_EXPIRED") {
@@ -87,7 +99,7 @@ func (s *Service) downloadOnce(ctx context.Context, f MediaFile, w io.WriterAt) 
 	if err != nil {
 		return err
 	}
-	_, err = downloader.NewDownloader().WithPartSize(downloadPartSize).
+	_, err = downloader.NewDownloader().WithPartSize(DownloadPartSize).
 		Download(api, f.Location).WithThreads(downloadConcurrency).Parallel(ctx, w)
 	if err != nil {
 		return fmt.Errorf("download: %w", err)

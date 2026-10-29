@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -54,10 +56,10 @@ func (d *fileDC) Invoke(_ context.Context, in bin.Encoder, out bin.Decoder) erro
 		return tgerr.New(400, "FILE_REFERENCE_EXPIRED")
 	}
 
-	if req.Limit != downloadPartSize {
+	if req.Limit != DownloadPartSize {
 		return tgerr.New(400, "LIMIT_INVALID")
 	}
-	if req.Offset < 0 || req.Offset%downloadPartSize != 0 {
+	if req.Offset < 0 || req.Offset%DownloadPartSize != 0 {
 		return tgerr.New(400, "OFFSET_INVALID")
 	}
 	start := min(req.Offset, int64(len(d.data)))
@@ -228,5 +230,27 @@ func TestDownloadFileRoutesToFileDC(t *testing.T) {
 				t.Error("home connection got no requests")
 			}
 		})
+	}
+}
+
+// Each finished download logs one line for the measurement plan: where it
+// came from and how long it took, nothing about the file or the chat.
+func TestDownloadFileLogsTiming(t *testing.T) {
+	data := fileData(1500)
+	var buf bytes.Buffer
+	s := &Service{API: tg.NewClient(&fileDC{}), Log: slog.New(slog.NewTextHandler(&buf, nil)),
+		Pools: &fakePools{dcs: map[int]*fileDC{4: {data: data}}, this: homeDC}}
+	f := MediaFile{Info: MediaInfo{Size: 1500}, Location: &tg.InputDocumentFileLocation{ID: 1}, DC: 4}
+	if err := s.DownloadFile(context.Background(), f, &memSink{}, noRefetch); err != nil {
+		t.Fatal(err)
+	}
+	line := buf.String()
+	for _, want := range []string{"download done", "dc=4", "concurrency=8", "bytes=1500", "elapsed="} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log %q lacks %q", line, want)
+		}
+	}
+	if strings.Count(line, "\n") != 1 {
+		t.Errorf("log has %d lines, want 1", strings.Count(line, "\n"))
 	}
 }

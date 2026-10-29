@@ -255,6 +255,7 @@ func runServe(ctx context.Context, args []string) error {
 			if err != nil {
 				return err
 			}
+			svc.Pools, svc.Log = c, log // files on other DCs download from there
 			policy := mcpserver.Policy{
 				ReadOnly:       e.cfg.ReadOnly,
 				AllowedChatIDs: e.cfg.AllowedChatIDs,
@@ -278,6 +279,10 @@ func runServe(ctx context.Context, args []string) error {
 			defer func() {
 				cancel()  // stops the listeners, relayed sessions and updates...
 				wg.Wait() // ...and waits for them, in this order
+				// Then the download pools, which those sessions used.
+				if err := svc.Close(); err != nil {
+					log.Warn("close download pools", "err", err)
+				}
 			}()
 			for ro, srv := range map[bool]*mcp.Server{false: full, true: readOnlySrv} {
 				ln, err := hub.Listen(hub.SocketPath(e.paths.DataDir, e.account, version, ro))

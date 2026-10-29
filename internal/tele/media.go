@@ -65,6 +65,7 @@ func (s *Service) Media(ctx context.Context, r Resolved, id int) (MediaFile, err
 			return f, nil
 		}
 		f.photo = p
+		f.DC = p.DCID
 		f.Info.Kind, f.Info.MimeType, f.Info.Downloadable = "photo", "image/jpeg", true
 		f.Info.Width, f.Info.Height, f.Info.Size = best.W, best.H, int64(best.Size)
 		f.Location = photoLocation(p, best.Type)
@@ -89,6 +90,7 @@ func (s *Service) Media(ctx context.Context, r Resolved, id int) (MediaFile, err
 			}
 		}
 		f.Location = &tg.InputDocumentFileLocation{ID: d.ID, AccessHash: d.AccessHash, FileReference: d.FileReference}
+		f.DC = d.DCID
 	}
 	return f, nil
 }
@@ -122,9 +124,15 @@ func (f MediaFile) DefaultName() string {
 	return fmt.Sprintf("telegram_%d_%d%s", f.Info.ChatID, f.Info.MessageID, ext)
 }
 
-// Download streams a file location into w.
-func (s *Service) Download(ctx context.Context, loc tg.InputFileLocationClass, w io.Writer) error {
-	if _, err := downloader.NewDownloader().Download(s.API, loc).Stream(ctx, w); err != nil {
+// Download streams a file location on dc into w, one part at a time. It
+// is for small files (view_photo) and files of unknown size; DownloadFile
+// is the parallel one.
+func (s *Service) Download(ctx context.Context, dc int, loc tg.InputFileLocationClass, w io.Writer) error {
+	api, err := s.fileAPI(ctx, dc)
+	if err != nil {
+		return err
+	}
+	if _, err := downloader.NewDownloader().WithPartSize(DownloadPartSize).Download(api, loc).Stream(ctx, w); err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
 	return nil
