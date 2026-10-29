@@ -1,6 +1,6 @@
 # Spec: fast `send_file` that can outlive one tool call
 
-Status: approved. Nothing here is implemented yet.
+Status: approved; measured (commit 1 ships mode C). Nothing implemented yet.
 
 Companion of `docs/specs/download-media.md`, which did the same for
 downloads; this reuses what it built (DC pools, the job registry, the
@@ -64,6 +64,19 @@ Inputs and outputs of `send_file` stay the same.
   primary, C = B through the pool. Alternated (ABCABC…), 3 runs each, with a
   30 MB and a 150 MB random file. What ships is what measures best; if B is
   as fast as C, the pool is not used for uploads.
+
+### Measurement result (2026-10-29, Saved Messages, server log)
+
+Alternated runs, MiB/s; "cut" = stopped by the 55 s call timeout, nothing
+sent:
+
+| File | A (1 thread, 128 KB, primary) | B (8 threads, 512 KB, primary) | C (B through the home pool) |
+| --- | --- | --- | --- |
+| 30 MB | 0.38 cut, 0.57, 0.55 → **0.55** | 1.07, 2.17, 1.77 → **1.77** | 7.66, 7.94, 7.21 → **7.66** (3.6–4.0 s) |
+| 150 MB | — | 2.03 cut, 2.02 cut | 10.58, 10.49 (13.5 s each) |
+
+C is ~14× A and ~4× B; B alone does not get 150 MB through one call. No
+session error appeared. **C ships**: the pool, 512 KB parts, 8 threads.
 
 ## Commit 2: background mode for `send_file`
 
