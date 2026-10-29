@@ -118,6 +118,14 @@ func (s *Service) downloadOnce(ctx context.Context, f MediaFile, w io.WriterAt) 
 	return nil
 }
 
+// homeDC is the account's DC, 0 while it is not known yet.
+func (s *Service) homeDC() int {
+	if s.Pools == nil {
+		return 0
+	}
+	return s.Pools.Config().ThisDC
+}
+
 // poolOpenTimeout bounds one pool opening (dial and auth transfer).
 const poolOpenTimeout = 30 * time.Second
 
@@ -158,7 +166,7 @@ type dcEntry struct {
 //
 // While the home DC is unknown (0), or the file's DC is, the primary
 // connection is used.
-func (s *Service) fileAPI(ctx context.Context, dc int) (downloader.Client, error) {
+func (s *Service) fileAPI(ctx context.Context, dc int) (*tg.Client, error) {
 	primary := tg.NewClient(floodLimit{s.API.Invoker()})
 	if s.Pools == nil || dc == 0 {
 		return primary, nil

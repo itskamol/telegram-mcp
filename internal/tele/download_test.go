@@ -102,7 +102,7 @@ func (d *fileDC) calls() int {
 type fakePools struct {
 	dcs     map[int]*fileDC
 	this    int // Config().ThisDC
-	home    *fileDC
+	home    telegram.CloseInvoker
 	poolErr error
 
 	mu      sync.Mutex

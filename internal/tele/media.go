@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"os"
+	"sync/atomic"
 
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/uploader"
@@ -237,12 +238,27 @@ type Upload struct {
 	Name     string
 	MimeType string
 	AsPhoto  bool // send as a compressed photo instead of a document
+	// Uploaded, if set, counts the bytes sent so far.
+	Uploaded *atomic.Int64
 }
 
 // SendFile uploads a file and posts it with an optional caption, reply and
 // topic. It returns the new message ID.
 func (s *Service) SendFile(ctx context.Context, r Resolved, up Upload, caption Formatted, replyTo, topicID int, randomID int64) (int, error) {
-	in, err := uploader.NewUploader(s.API).Upload(ctx, uploader.NewUpload(up.Name, up.File, up.Size))
+	// Files are always uploaded to the home DC, through its pool: Telegram
+	// limits each connection, and measured, a pool with 512 KB parts and 8
+	// in flight was ~14x faster than one connection with gotd's defaults.
+	// Files of 10 MB or less are sent in order (the protocol needs their
+	// MD5), the rest in parallel.
+	api, err := s.fileAPI(ctx, s.homeDC())
+	if err != nil {
+		return 0, err
+	}
+	u := uploader.NewUploader(api).WithPartSize(uploader.MaximumPartSize).WithThreads(downloadConcurrency)
+	if up.Uploaded != nil {
+		u = u.WithProgress(uploadProgress{up.Uploaded})
+	}
+	in, err := u.Upload(ctx, uploader.NewUpload(up.Name, up.File, up.Size))
 	if err != nil {
 		return 0, fmt.Errorf("upload: %w", err)
 	}
@@ -266,4 +282,12 @@ func (s *Service) SendFile(ctx context.Context, r Resolved, up Upload, caption F
 		return 0, fmt.Errorf("send file: %w", err)
 	}
 	return sentID(upd, req.RandomID), nil
+}
+
+// uploadProgress stores the bytes uploaded so far.
+type uploadProgress struct{ n *atomic.Int64 }
+
+func (p uploadProgress) Chunk(_ context.Context, st uploader.ProgressState) error {
+	p.n.Store(st.Uploaded)
+	return nil
 }
