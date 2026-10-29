@@ -217,8 +217,8 @@ Every guarantee of `WriteNew` is kept:
 | Inside `allowed_roots`, symlinks resolved | Unchanged: `dir` still comes from `ResolveDir`, which is called before any download. |
 | Never overwrite | Unchanged: data goes to `os.CreateTemp(dir, ".telegram-mcp-*.part")`, then `os.Link` to the first free `name`, `name (1)`, …; `Link` fails on an existing file. The temp file is removed in every case. Shared code with `WriteNew` moves into one helper. |
 | Size checked **before** | `size > limit` → `ErrTooLarge` before the temp file exists (the handler also checks `f.Info.Size` as today). |
-| Size checked **during** | `limitWriterAt.WriteAt(p, off)` refuses `off < 0` or `off+len(p) > limit` with `ErrTooLarge`. Out-of-order writes mean a running total is wrong, so the check is on the end offset, which bounds the file size no matter the order. |
-| **Complete**, not just the right length | A file of the right length can still have a hole: if a middle part is never written and the last one is, the `.part` is a sparse file with a run of zero bytes and the correct size. So the length alone proves nothing. The writer tracks coverage (one bit per part; 200 MB = 200 bits). A `WriteAt(p, off)` is accepted only if `off % partSize == 0`, its part's bit is not yet set, and **either** `len(p) == partSize` and `off+len(p) <= size`, **or** `off+len(p) == size` (the last part, which may be shorter; when `size` is an exact multiple of `partSize`, the last part is full-length and passes the first rule). Anything else (misaligned, short in the middle, past `size`, or a repeat) is an error. `len(p) == 0` is accepted as a no-op that sets no bit: gotd does not send it today (see below), and if a future version does, the final coverage check still catches any missing data. After `write` returns, every part's bit must be set **and** the atomic `written` counter must equal `size`, else an error and nothing is kept. Since writes cannot overlap, these two checks together mean every byte came from Telegram. |
+| Size checked **during** | `PartWriter.WriteAt` refuses any write that ends past `size` (`ErrBadPart`), and `size <= limit` was checked before, so the file can never grow past `limit`. Out-of-order writes make a running total meaningless, so the bound is on the end offset. No separate `limitWriterAt` is needed. |
+| **Complete**, not just the right length | A file of the right length can still have a hole: if a middle part is never written and the last one is, the `.part` is a sparse file with a run of zero bytes and the correct size. So the length alone proves nothing. The writer tracks coverage (one bit per part; 200 MB = 200 bits). A `WriteAt(p, off)` is accepted only if `off % partSize == 0`, its part's bit is not yet set, `off+len(p) <= size`, and **either** `len(p) == partSize` **or** `len(p) < partSize` and `off+len(p) == size` (the last part; when `size` is an exact multiple of `partSize`, the last part is full-length and passes the first rule). `len(p)` is never more than `partSize`: one write that ends at `size` but spans two parts would otherwise mark only its first part. The bit is checked and set in **one** critical section, so two writers of the same part cannot both pass. Anything else (misaligned, short in the middle, past `size`, or a repeat) is an error. `len(p) == 0` is accepted as a no-op that sets no bit: gotd does not send it today (see below), and if a future version does, the final coverage check still catches any missing data. After `write` returns, every part's bit must be set **and** the atomic `written` counter must equal `size`, else an error and nothing is kept. Since writes cannot overlap, these two checks together mean every byte came from Telegram. |
 | `.part` then rename | Unchanged (link + remove, as above). |
 | Concurrency | `*os.File.WriteAt` is safe for concurrent use (`pwrite`); gotd also serialises through `syncio.NewWriterAt`. The part bitmap is under a small mutex; `written` is atomic (commit 2 reads it for progress). |
 | Restart (1.5) | `reset()` truncates the temp file to 0, clears the bitmap and sets `written` to 0, under the same mutex, while no write is running. |
@@ -439,7 +439,18 @@ session start two copies of the same file.
   `ctx`, so `cancel()` alone does not stop them; `Shutdown` does. Done the other way
   round, the `canceled` line goes to a closed file and is lost silently, and
   the row stays in a closed DB, so the next start sweeps a `.part` that is
-  already gone. Step 2 has a 10 s limit: a job stuck past it is logged to
+  already gone.
+
+  **A cancelled job never links its file.** The job's `write` callback ends
+  with `return ctx.Err()` after the download, so a job cancelled at step 1
+  returns an error and `WriteNewAt` removes the `.part` instead of linking
+  it. The check sits in the job, not in `WriteNewAt`, which stays free of
+  job logic. Between that check and the link there are only `Close`, the
+  bitmap check and one `os.Link`; a job that passed the check before
+  step 1 links and writes its audit line in that time, long before the
+  10 s limit below. So a finished file without an audit line cannot appear.
+
+  Step 2 has a 10 s limit: a job stuck past it is logged to
   stderr and abandoned. This is the one accepted exception to the order:
   its late audit and DB writes may hit closed handles and fail (logged to
   stderr, not lost silently), and its row stays, so the next start's sweep
