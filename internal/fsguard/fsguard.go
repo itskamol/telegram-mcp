@@ -110,13 +110,21 @@ func within(root, path string) bool {
 // Data goes to a temp file first, so a failed or oversized download leaves
 // nothing behind. It returns the final path.
 func WriteNew(dir, name string, limit int64, write func(io.Writer) error) (string, error) {
+	return writeNew(dir, name, func(f *os.File) error {
+		return write(&limitWriter{w: f, left: limit})
+	})
+}
+
+// writeNew fills a temp file in dir and links it to the first free
+// variant of name; the temp file is removed in every case.
+func writeNew(dir, name string, fill func(*os.File) error) (string, error) {
 	tmp, err := os.CreateTemp(dir, ".telegram-mcp-*.part")
 	if err != nil {
 		return "", osDenied(err, dir)
 	}
 	defer os.Remove(tmp.Name())
 
-	werr := write(&limitWriter{w: tmp, left: limit})
+	werr := fill(tmp)
 	if cerr := tmp.Close(); werr == nil {
 		werr = cerr
 	}
