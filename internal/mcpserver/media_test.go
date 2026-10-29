@@ -337,14 +337,18 @@ func TestDownloadMediaRetryAfterFailure(t *testing.T) {
 	}
 }
 
-// fakeJournal records the partial files a download announces.
+// fakeJournal records the partial files a download announces. Like the
+// database behind the real one, it refuses a cancelled context.
 type fakeJournal struct {
 	mu   sync.Mutex
 	open map[string]bool
 	adds int
 }
 
-func (j *fakeJournal) Add(_ context.Context, path string) error {
+func (j *fakeJournal) Add(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.open == nil {
@@ -355,7 +359,10 @@ func (j *fakeJournal) Add(_ context.Context, path string) error {
 	return nil
 }
 
-func (j *fakeJournal) Remove(_ context.Context, path string) error {
+func (j *fakeJournal) Remove(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	delete(j.open, path)
