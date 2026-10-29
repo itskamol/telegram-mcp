@@ -268,9 +268,12 @@ func runServe(ctx context.Context, args []string) error {
 			if fw != nil {
 				feedTool = &mcpserver.Feed{Store: fw.store, Notify: fw.handler.Notify, Scope: scope}
 			}
-			full := mcpserver.New(svc, policy, auditLog, version, feedTool)
+			// One download registry for both servers, on the client's context:
+			// a read-only and a full session must not fetch one file twice.
+			downloads := mcpserver.NewDownloads(ctx)
+			full := mcpserver.New(svc, policy, auditLog, version, feedTool, downloads)
 			policy.ReadOnly = true
-			readOnlySrv := mcpserver.New(svc, policy, auditLog, version, feedTool)
+			readOnlySrv := mcpserver.New(svc, policy, auditLog, version, feedTool, downloads)
 
 			// Serve other processes of this profile on two sockets, one per
 			// mode, so a --read-only relay can only reach read tools.
@@ -279,7 +282,9 @@ func runServe(ctx context.Context, args []string) error {
 			defer func() {
 				cancel()  // stops the listeners, relayed sessions and updates...
 				wg.Wait() // ...and waits for them, in this order
-				// Then the download pools, which those sessions used.
+				// Then the downloads, which write audit lines and need the
+				// pools, and then the pools.
+				downloads.Shutdown()
 				if err := svc.Close(); err != nil {
 					log.Warn("close download pools", "err", err)
 				}

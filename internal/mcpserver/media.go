@@ -58,9 +58,11 @@ type downloadIn struct {
 }
 
 type downloadOut struct {
-	Path     string `json:"path"`
-	Size     int64  `json:"size"`
-	MimeType string `json:"mime_type,omitempty"`
+	Status     string `json:"status"` // "done", or "downloading" while it goes on in the server
+	Path       string `json:"path"`   // while downloading, the planned path
+	Size       int64  `json:"size"`
+	Downloaded int64  `json:"downloaded,omitempty"` // bytes so far, while downloading
+	MimeType   string `json:"mime_type,omitempty"`
 }
 
 func (s *Server) downloadMedia(ctx context.Context, _ *mcp.CallToolRequest, in downloadIn) (*mcp.CallToolResult, downloadOut, error) {
@@ -83,27 +85,68 @@ func (s *Server) downloadMedia(ctx context.Context, _ *mcp.CallToolRequest, in d
 
 	// The original name comes from the sender, so it is sanitized too.
 	name := fsguard.SafeName(cmp.Or(in.FileName, f.DefaultName()), "telegram_file")
+	key := jobKey{chat: f.Info.ChatID, msg: in.MessageID}
+	info := jobInfo{planned: filepath.Join(dir, name), size: f.Info.Size, mime: f.Info.MimeType}
+	j, err := s.downloads.start(key, info, func(ctx context.Context, j *job) (string, error) {
+		return s.runDownload(ctx, j, f, dir, name, in)
+	})
+	if err != nil {
+		return nil, downloadOut{}, err
+	}
+	if err := s.downloads.waitFor(ctx, j); err != nil {
+		return nil, downloadOut{}, err
+	}
+	select {
+	case <-j.done:
+	default:
+		return nil, downloadOut{Status: "downloading", Path: j.info.planned, Size: j.info.size,
+			Downloaded: j.downloaded(), MimeType: j.info.mime}, nil
+	}
+	path, err := j.result()
+	if err != nil {
+		s.downloads.forget(j) // reported now; the next call tries again
+		return nil, downloadOut{}, err
+	}
+	return nil, downloadOut{Status: "done", Path: path, Size: j.info.size, MimeType: j.info.mime}, nil
+}
+
+// runDownload is the body of a download job, on the server's context. It
+// writes the job's one audit line when it ends, whoever is still waiting.
+func (s *Server) runDownload(ctx context.Context, j *job, f tele.MediaFile, dir, name string, in downloadIn) (string, error) {
 	var path string
+	var err error
 	if f.Info.Size > 0 {
 		// Parts arrive out of order; the file is kept only if all of them came.
 		refetch := func(ctx context.Context) (tele.MediaFile, error) {
 			return s.media(ctx, mediaIn{Chat: in.Chat, MessageID: in.MessageID})
 		}
 		path, err = fsguard.WriteNewAt(dir, name, f.Info.Size, s.policy.MaxDownload, tele.DownloadPartSize,
-			func(w *fsguard.PartWriter) error { return s.svc.DownloadFile(ctx, f, w, refetch) })
+			func(w *fsguard.PartWriter) error {
+				j.setProgress(w)
+				if err := s.svc.DownloadFile(ctx, f, w, refetch); err != nil {
+					return err
+				}
+				// A job cancelled by shutdown must not link its file: its
+				// audit line could no longer be written.
+				return ctx.Err()
+			})
 	} else {
 		// Unknown size: stream in order, bounded by the limit as it grows.
 		path, err = fsguard.WriteNew(dir, name, s.policy.MaxDownload, func(w io.Writer) error {
-			return s.svc.Download(ctx, f.DC, f.Location, w)
+			if err := s.svc.Download(ctx, f.DC, f.Location, w); err != nil {
+				return err
+			}
+			return ctx.Err()
 		})
 	}
 	if errors.Is(err, fsguard.ErrTooLarge) {
 		err = fmt.Errorf("file is larger than max_download_mb (%d MB)", s.policy.MaxDownload>>20)
 	}
-	if err := s.record(audit.Entry{Tool: "download_media", ChatID: f.Info.ChatID, IDs: []int{in.MessageID}, Path: path}, err); err != nil {
-		return nil, downloadOut{}, err
+	if errors.Is(err, context.Canceled) && s.downloads.ctx.Err() != nil {
+		err = fmt.Errorf("canceled: server stopped")
 	}
-	return nil, downloadOut{Path: path, Size: f.Info.Size, MimeType: f.Info.MimeType}, nil
+	err = s.record(audit.Entry{Tool: "download_media", ChatID: f.Info.ChatID, IDs: []int{in.MessageID}, Path: path}, err)
+	return path, err
 }
 
 func (s *Server) viewPhoto(ctx context.Context, _ *mcp.CallToolRequest, in mediaIn) (*mcp.CallToolResult, any, error) {

@@ -50,10 +50,20 @@ func (s *Service) DownloadFile(ctx context.Context, f MediaFile, w PartSink,
 	refetch func(context.Context) (MediaFile, error)) error {
 	start := time.Now()
 	err := s.download(ctx, f, w, refetch)
-	if err == nil && s.Log != nil {
+	if s.Log != nil {
 		// For the measurement plan; nothing about the file or the chat.
-		s.Log.Info("download done", "dc", f.DC, "concurrency", downloadConcurrency,
-			"bytes", f.Info.Size, "elapsed", time.Since(start).Round(time.Millisecond))
+		elapsed := time.Since(start).Round(time.Millisecond)
+		if err == nil {
+			s.Log.Info("download done", "dc", f.DC, "concurrency", downloadConcurrency,
+				"bytes", f.Info.Size, "elapsed", elapsed)
+		} else {
+			var written int64 = -1 // unknown
+			if c, ok := w.(interface{ Written() int64 }); ok {
+				written = c.Written()
+			}
+			s.Log.Warn("download failed", "dc", f.DC, "concurrency", downloadConcurrency,
+				"bytes", f.Info.Size, "written", written, "elapsed", elapsed, "err", err)
+		}
 	}
 	return err
 }

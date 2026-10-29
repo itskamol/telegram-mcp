@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/telegram"
@@ -33,13 +35,15 @@ type fakeTelegram struct {
 	media   []tg.MessageMediaClass
 	data    []byte
 	expired []byte
+	gate    chan struct{} // if set, getFile waits until it is closed
+	fail    error         // if set, the next getFile fails with it, once
 
 	mu      sync.Mutex
 	fetches int
 	getFile int
 }
 
-func (f *fakeTelegram) Invoke(_ context.Context, in bin.Encoder, out bin.Decoder) error {
+func (f *fakeTelegram) Invoke(ctx context.Context, in bin.Encoder, out bin.Decoder) error {
 	var reply bin.Encoder
 	switch req := in.(type) {
 	case *tg.MessagesGetMessagesRequest:
@@ -53,7 +57,19 @@ func (f *fakeTelegram) Invoke(_ context.Context, in bin.Encoder, out bin.Decoder
 	case *tg.UploadGetFileRequest:
 		f.mu.Lock()
 		f.getFile++
+		fail := f.fail
+		f.fail = nil
 		f.mu.Unlock()
+		if fail != nil {
+			return fail
+		}
+		if f.gate != nil {
+			select {
+			case <-f.gate:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 		if ref := fileRef(req.Location); f.expired != nil && bytes.Equal(ref, f.expired) {
 			return tgerr.New(400, "FILE_REFERENCE_EXPIRED")
 		}
@@ -103,16 +119,24 @@ func (onePool) Config() tg.Config { return tg.Config{ThisDC: testHomeDC} }
 func mediaServer(t *testing.T, home, far *fakeTelegram) (*Server, string) {
 	t.Helper()
 	dir := t.TempDir()
-	log, err := audit.Open(filepath.Join(t.TempDir(), "audit.log"), "test")
+	logPath := filepath.Join(t.TempDir(), "audit.log")
+	log, err := audit.Open(logPath, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { log.Close() })
 	svc := &tele.Service{API: tg.NewClient(home), Pools: onePool{far}, SelfID: testSelf}
 	t.Cleanup(func() { svc.Close() })
-	return &Server{svc: svc, audit: log,
-		policy: Policy{AllowedRoots: []string{dir}, MaxDownload: 10 << 20}}, dir
+	dl := NewDownloads(context.Background())
+	t.Cleanup(dl.Shutdown)
+	s := &Server{svc: svc, audit: log, downloads: dl,
+		policy: Policy{AllowedRoots: []string{dir}, MaxDownload: 10 << 20}}
+	auditPaths.Store(s, logPath)
+	return s, dir
 }
+
+// auditPaths maps a test server to its audit file.
+var auditPaths sync.Map
 
 func fileBytes(n int) []byte {
 	b := make([]byte, n)
@@ -174,5 +198,141 @@ func TestViewPhotoOnFileDC(t *testing.T) {
 	}
 	if _, getFile := home.counts(); getFile != 0 {
 		t.Errorf("home got %d getFile, want 0", getFile)
+	}
+}
+
+// background is a document on another DC whose parts are held back until
+// the test opens the gate.
+func background(t *testing.T) (s *Server, dir string, data []byte, far *fakeTelegram) {
+	t.Helper()
+	data = fileBytes(3 << 20)
+	doc := &tg.MessageMediaDocument{Document: &tg.Document{
+		ID: 9, AccessHash: 1, FileReference: []byte("r"), DCID: testFileDC, Size: int64(len(data)),
+		MimeType:   "application/octet-stream",
+		Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: "big.bin"}},
+	}}
+	home := &fakeTelegram{media: []tg.MessageMediaClass{doc}}
+	far = &fakeTelegram{data: data, gate: make(chan struct{})}
+	s, dir = mediaServer(t, home, far)
+	s.downloads.wait = 50 * time.Millisecond
+	return s, dir, data, far
+}
+
+func auditLines(t *testing.T, s *Server, tool string) []string {
+	t.Helper()
+	path, _ := auditPaths.Load(s)
+	b, err := os.ReadFile(path.(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if strings.Contains(l, `"tool":"`+tool+`"`) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// A download that outlasts the wait returns status downloading and goes
+// on in the server; calling again does not start a second one, and once it
+// is done the same call returns the path. One audit line, at the end.
+func TestDownloadMediaInBackground(t *testing.T) {
+	s, dir, data, far := background(t)
+	call := func() downloadOut {
+		t.Helper()
+		_, out, err := s.downloadMedia(context.Background(), nil, downloadIn{Chat: "me", MessageID: 5})
+		if err != nil {
+			t.Fatalf("download_media: %v", err)
+		}
+		return out
+	}
+	real, _ := filepath.EvalSymlinks(dir)
+
+	first := call()
+	if first.Status != "downloading" || first.Size != int64(len(data)) || first.Path != filepath.Join(real, "big.bin") {
+		t.Fatalf("first call = %+v, want downloading with planned path and size", first)
+	}
+	if second := call(); second.Status != "downloading" {
+		t.Fatalf("second call = %+v, want still downloading", second)
+	}
+	if n := len(auditLines(t, s, "download_media")); n != 0 {
+		t.Errorf("%d audit lines while running, want 0", n)
+	}
+
+	close(far.gate)
+	var done downloadOut
+	for range 100 {
+		if done = call(); done.Status == "done" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond) // polling the tool, as a client would
+	}
+	if done.Status != "done" || done.Path != filepath.Join(real, "big.bin") {
+		t.Fatalf("after release = %+v, want done", done)
+	}
+	if got, _ := os.ReadFile(done.Path); !bytes.Equal(got, data) {
+		t.Error("file differs")
+	}
+	// 3 parts, plus at most 8 requests past the end: one download, not two.
+	if _, getFile := far.counts(); getFile > 3+8 {
+		t.Errorf("%d getFile requests: more than one download ran", getFile)
+	}
+	if n := len(auditLines(t, s, "download_media")); n != 1 {
+		t.Errorf("%d audit lines, want 1", n)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("dir has %d entries, want only big.bin", len(entries))
+	}
+}
+
+// A call that gives up only stops waiting: the job goes on and the next
+// call finds it.
+func TestDownloadMediaCallCancelKeepsJob(t *testing.T) {
+	s, _, _, far := background(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.downloadMedia(ctx, nil, downloadIn{Chat: "me", MessageID: 5})
+
+	_, out, err := s.downloadMedia(context.Background(), nil, downloadIn{Chat: "me", MessageID: 5})
+	if err != nil || out.Status != "downloading" {
+		t.Fatalf("after a cancelled call: %+v %v, want the job still downloading", out, err)
+	}
+	close(far.gate)
+}
+
+// Stopping the server cancels the job: no file is linked, no .part is
+// left, and the job writes one audit line with its error.
+func TestDownloadMediaShutdownCancels(t *testing.T) {
+	s, dir, _, _ := background(t)
+	if _, out, err := s.downloadMedia(context.Background(), nil, downloadIn{Chat: "me", MessageID: 5}); err != nil || out.Status != "downloading" {
+		t.Fatalf("start: %+v %v", out, err)
+	}
+	s.downloads.Shutdown()
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("dir has %d entries after Shutdown, want none", len(entries))
+	}
+	lines := auditLines(t, s, "download_media")
+	if len(lines) != 1 || !strings.Contains(lines[0], `"error"`) {
+		t.Errorf("audit = %v, want one line with an error", lines)
+	}
+}
+
+// A failed download reports its error once; the next call downloads again
+// instead of getting the old error for the rest of the result TTL.
+func TestDownloadMediaRetryAfterFailure(t *testing.T) {
+	s, _, data, far := background(t)
+	far.fail = tgerr.New(400, "FILE_ID_INVALID")
+	close(far.gate)
+	_, out, err := s.downloadMedia(context.Background(), nil, downloadIn{Chat: "me", MessageID: 5})
+	if err == nil {
+		t.Fatalf("first call = %+v, want the error", out)
+	}
+	_, out, err = s.downloadMedia(context.Background(), nil, downloadIn{Chat: "me", MessageID: 5})
+	if err != nil || out.Status != "done" || out.Size != int64(len(data)) {
+		t.Fatalf("retry = %+v %v, want done", out, err)
+	}
+	if n := len(auditLines(t, s, "download_media")); n != 2 {
+		t.Errorf("%d audit lines, want 2 (the failure and the retry)", n)
 	}
 }

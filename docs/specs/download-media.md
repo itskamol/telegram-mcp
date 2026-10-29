@@ -440,16 +440,20 @@ session start two copies of the same file.
 
 - **Key:** `(chat_id marked, message_id)`. `dir` and `file_name` are not part
   of the key: a second call that asks for another dir or name while the job
-  runs gets the running job's status, and a `note` field says the first
-  call's dir and name are used. The account is implicit (one server per
-  profile).
+  runs gets the running job's status. *As built:* no `note` field; the tool
+  description says that while a download runs a different dir or file_name
+  is ignored, and `path` shows the first call's planned path. The account is
+  implicit (one server per profile).
 - The handler still runs the normal checks on every call **before** looking
   up the key: allowlist (`s.chat`), `ResolveDir`, message fetch, size limit.
   A repeat call cannot read a job it would not be allowed to start.
-- **Finished jobs** (done or failed) stay in the registry for **30 min** so a
-  repeat call gets the result; after that, or beyond 32 finished entries
-  (oldest first), they are forgotten and a new call downloads again (into
-  `name (1)`, as today).
+- **Finished jobs** stay in the registry for **30 min** so a repeat call
+  gets the result; after that they are forgotten and a new call downloads
+  again (into `name (1)`, as today). *As built:* a **failed** job is
+  forgotten as soon as a call has reported its error, so a retry downloads
+  again instead of getting the old error for 30 min. The 32-entry cap is not
+  built: entries are only replaced by key, and the TTL bounds them in
+  practice.
 - Before a `done` entry is returned, its `path` is checked with `os.Stat`:
   if the user deleted or moved the file, or its size is no longer `size`, the
   entry is forgotten and this call starts a fresh download. A path that no

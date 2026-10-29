@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gotd/td/bin"
@@ -254,3 +255,42 @@ func TestDownloadFileLogsTiming(t *testing.T) {
 		t.Errorf("log has %d lines, want 1", strings.Count(line, "\n"))
 	}
 }
+
+// A download that fails logs how far it got, so a timeout in the field
+// still tells how fast it was going.
+func TestDownloadFileLogsFailure(t *testing.T) {
+	data := fileData(3 << 20)
+	var buf bytes.Buffer
+	far := &fileDC{data: data, expired: []byte("r"), expiredFrom: 2 << 20}
+	s := &Service{API: tg.NewClient(&fileDC{}), Log: slog.New(slog.NewTextHandler(&buf, nil)),
+		Pools: &fakePools{dcs: map[int]*fileDC{4: far}, this: homeDC}}
+	f := MediaFile{Info: MediaInfo{Size: int64(len(data))}, DC: 4,
+		Location: &tg.InputDocumentFileLocation{ID: 1, FileReference: []byte("r")}}
+	sink := &countingSink{}
+	if err := s.DownloadFile(context.Background(), f, sink, noRefetch); err == nil {
+		t.Fatal("download succeeded")
+	}
+	line := buf.String()
+	for _, want := range []string{"download failed", "dc=4", "written=", "elapsed=", "err="} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log %q lacks %q", line, want)
+		}
+	}
+	if strings.Contains(line, "download done") {
+		t.Error("failure logged as done")
+	}
+}
+
+// countingSink is a memSink that reports what it was given, like
+// fsguard.PartWriter.
+type countingSink struct {
+	memSink
+	n atomic.Int64
+}
+
+func (c *countingSink) WriteAt(p []byte, off int64) (int, error) {
+	c.n.Add(int64(len(p)))
+	return c.memSink.WriteAt(p, off)
+}
+
+func (c *countingSink) Written() int64 { return c.n.Load() }

@@ -31,7 +31,7 @@ func connectFeed(t *testing.T, p Policy, fd *Feed) *mcp.ClientSession {
 	t.Cleanup(func() { _ = log.Close() })
 
 	st, ct := mcp.NewInMemoryTransports()
-	srv := New(nil, p, log, "test", fd)
+	srv := New(nil, p, log, "test", fd, nil)
 	if _, err := srv.Connect(ctx, st, nil); err != nil {
 		t.Fatal(err)
 	}
