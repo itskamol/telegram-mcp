@@ -291,3 +291,30 @@ func TestMarkReadUpTo(t *testing.T) {
 		t.Errorf("channel, whole chat: %#v", inv.Requests[0])
 	}
 }
+
+// Media without a file name (round videos, voice notes, stickers) gets
+// the extension people expect, not the first one Go's MIME table lists in
+// alphabetical order (.m4v for video/mp4, .m2a for audio/mpeg).
+func TestDefaultNameExtension(t *testing.T) {
+	cases := map[string]string{
+		"video/mp4":                ".mp4",
+		"audio/mpeg":               ".mp3",
+		"audio/ogg":                ".ogg",
+		"audio/mp4":                ".m4a",
+		"image/jpeg":               ".jpg",
+		"text/plain":               ".txt",
+		"application/x-tgsticker":  ".tgs",
+		"application/pdf":          ".pdf", // from the MIME table
+		"application/x-no-such-ty": ".bin", // unknown
+	}
+	for typ, want := range cases {
+		f := MediaFile{Info: MediaInfo{ChatID: -100, MessageID: 7, MimeType: typ}}
+		if got := f.DefaultName(); got != "telegram_-100_7"+want {
+			t.Errorf("%s: %q, want extension %s", typ, got, want)
+		}
+	}
+	named := MediaFile{Info: MediaInfo{FileName: "clip.m4v", MimeType: "video/mp4"}}
+	if got := named.DefaultName(); got != "clip.m4v" {
+		t.Errorf("a sender's file name must be kept: %q", got)
+	}
+}

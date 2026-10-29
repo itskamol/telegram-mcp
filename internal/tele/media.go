@@ -116,12 +116,26 @@ func (f MediaFile) DefaultName() string {
 		return f.Info.FileName
 	}
 	ext := ".bin"
-	if f.Info.MimeType == "image/jpeg" {
-		ext = ".jpg"
+	if e, ok := usualExt[f.Info.MimeType]; ok {
+		ext = e
 	} else if exts, _ := mime.ExtensionsByType(f.Info.MimeType); len(exts) > 0 {
 		ext = exts[0]
 	}
 	return fmt.Sprintf("telegram_%d_%d%s", f.Info.ChatID, f.Info.MessageID, ext)
+}
+
+// usualExt is the extension people expect for types Telegram sends without
+// a file name. mime.ExtensionsByType sorts alphabetically, so its first
+// entry is often an odd one (.m4v for video/mp4, .m2a for audio/mpeg), and
+// it does not know Telegram's own sticker type.
+var usualExt = map[string]string{
+	"video/mp4":               ".mp4",
+	"audio/mpeg":              ".mp3",
+	"audio/ogg":               ".ogg",
+	"audio/mp4":               ".m4a",
+	"image/jpeg":              ".jpg",
+	"text/plain":              ".txt",
+	"application/x-tgsticker": ".tgs",
 }
 
 // Download streams a file location on dc into w, one part at a time. It
