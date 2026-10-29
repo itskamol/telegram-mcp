@@ -27,6 +27,7 @@ var ErrWriteInFlight = errors.New("reset while a part is still being written")
 // once, at its own offset, and the file is kept only when every part was.
 type PartWriter struct {
 	f        io.WriterAt // the temp file; tests swap it
+	tmp      string      // its path
 	size     int64
 	partSize int64
 	written  atomic.Int64
@@ -78,6 +79,9 @@ func (w *PartWriter) WriteAt(p []byte, off int64) (int, error) {
 	}
 	return written, nil
 }
+
+// TempPath is the hidden temp file being written, for a crash journal.
+func (w *PartWriter) TempPath() string { return w.tmp }
 
 // Written returns the bytes accepted so far.
 func (w *PartWriter) Written() int64 { return w.written.Load() }
@@ -138,6 +142,7 @@ func WriteNewAt(dir, name string, size, limit, partSize int64, write func(*PartW
 	}
 	return writeNew(dir, name, func(f *os.File) error {
 		w := newPartWriter(f, size, partSize)
+		w.tmp = f.Name()
 		if err := write(w); err != nil {
 			return err
 		}

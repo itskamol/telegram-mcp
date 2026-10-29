@@ -1,10 +1,13 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -200,4 +203,83 @@ func TestDownloadsShutdown(t *testing.T) {
 	if _, err := d.start(jobKey{1, 6}, info, newGatedRun().run); !errors.Is(err, errStopping) {
 		t.Errorf("start after Shutdown: err = %v, want errStopping", err)
 	}
+}
+
+// A job that writes nothing for the stall time is cancelled with
+// errStalled; one that keeps writing is left alone.
+func TestDownloadsStall(t *testing.T) {
+	d := NewDownloads(context.Background())
+	d.stall = 100 * time.Millisecond
+	t.Cleanup(d.Shutdown)
+
+	stuck := newGatedRun()
+	js, _ := d.start(jobKey{1, 1}, info, stuck.run)
+	waitDone(t, js)
+	if _, err := js.result(); !errors.Is(err, errStalled) {
+		t.Errorf("stuck job: err = %v, want errStalled", err)
+	}
+
+	moving := newGatedRun()
+	jm, _ := d.start(jobKey{1, 2}, info, moving.run)
+	<-moving.entered
+	for range 10 { // 400 ms of steady progress, well past the stall time
+		moving.written.Add(1)
+		time.Sleep(40 * time.Millisecond)
+	}
+	select {
+	case <-jm.done:
+		_, err := jm.result()
+		t.Fatalf("progressing job ended: %v", err)
+	default:
+	}
+	close(moving.release)
+	waitDone(t, jm)
+}
+
+// A job that runs past the cap is cancelled with errTooLong.
+func TestDownloadsMaxDuration(t *testing.T) {
+	d := NewDownloads(context.Background())
+	d.maxDuration = 50 * time.Millisecond
+	t.Cleanup(d.Shutdown)
+	g := newGatedRun()
+	j, _ := d.start(jobKey{1, 1}, info, func(ctx context.Context, j *job) (string, error) {
+		// Keep progressing, so only the cap can end it.
+		go func() {
+			for ctx.Err() == nil {
+				g.written.Add(1)
+				time.Sleep(5 * time.Millisecond)
+			}
+		}()
+		return g.run(ctx, j)
+	})
+	waitDone(t, j)
+	if _, err := j.result(); !errors.Is(err, errTooLong) {
+		t.Errorf("err = %v, want errTooLong", err)
+	}
+}
+
+// A job that ignores cancellation does not hold shutdown forever: after
+// the limit Shutdown returns and logs it.
+func TestDownloadsShutdownLimit(t *testing.T) {
+	var log bytes.Buffer
+	d := NewDownloads(context.Background())
+	d.shutdownWait = 50 * time.Millisecond
+	d.Log = slog.New(slog.NewTextHandler(&log, nil))
+	release := make(chan struct{})
+	j, _ := d.start(jobKey{1, 1}, info, func(context.Context, *job) (string, error) {
+		<-release // deaf to its context, like a hung os.Link
+		return "", nil
+	})
+	returned := make(chan struct{})
+	go func() { d.Shutdown(); close(returned) }()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown waited for a stuck job")
+	}
+	if !strings.Contains(log.String(), "abandoned") {
+		t.Errorf("log %q does not name the abandoned job", log.String())
+	}
+	close(release)
+	waitDone(t, j)
 }

@@ -37,6 +37,12 @@ CREATE TABLE IF NOT EXISTS peers (
 	PRIMARY KEY (account, kind, id)
 );
 CREATE INDEX IF NOT EXISTS peers_username ON peers (account, username);
+CREATE TABLE IF NOT EXISTS partial_downloads (
+	account TEXT    NOT NULL,
+	path    TEXT    NOT NULL,
+	started INTEGER NOT NULL,
+	PRIMARY KEY (account, path)
+);
 `
 
 // DB is an open, locked database.

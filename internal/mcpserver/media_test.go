@@ -336,3 +336,89 @@ func TestDownloadMediaRetryAfterFailure(t *testing.T) {
 		t.Errorf("%d audit lines, want 2 (the failure and the retry)", n)
 	}
 }
+
+// fakeJournal records the partial files a download announces.
+type fakeJournal struct {
+	mu   sync.Mutex
+	open map[string]bool
+	adds int
+}
+
+func (j *fakeJournal) Add(_ context.Context, path string) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.open == nil {
+		j.open = map[string]bool{}
+	}
+	j.open[path] = true
+	j.adds++
+	return nil
+}
+
+func (j *fakeJournal) Remove(_ context.Context, path string) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	delete(j.open, path)
+	return nil
+}
+
+func (j *fakeJournal) paths() []string {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	var out []string
+	for p := range j.open {
+		out = append(out, p)
+	}
+	return out
+}
+
+// While a download runs its temp file is in the journal, so a crash can be
+// cleaned up at the next start; when it ends, by success or by shutdown,
+// the file is gone and so is the entry.
+func TestDownloadMediaJournalsPartialFile(t *testing.T) {
+	for _, end := range []string{"done", "shutdown"} {
+		t.Run(end, func(t *testing.T) {
+			s, dir, _, far := background(t)
+			jr := &fakeJournal{}
+			s.downloads.Journal = jr
+			if _, out, err := s.downloadMedia(context.Background(), nil, downloadIn{Chat: "me", MessageID: 5}); err != nil || out.Status != "downloading" {
+				t.Fatalf("start: %+v %v", out, err)
+			}
+			open := jr.paths()
+			if len(open) != 1 || filepath.Dir(open[0]) != filepath.Dir(filepath.Join(evalDir(t, dir), "x")) ||
+				!strings.HasPrefix(filepath.Base(open[0]), ".telegram-mcp-") {
+				t.Fatalf("journal while running = %v, want the one .part in %s", open, dir)
+			}
+			if _, err := os.Stat(open[0]); err != nil {
+				t.Fatalf("journaled file is not there: %v", err)
+			}
+
+			if end == "done" {
+				close(far.gate)
+				for range 100 {
+					if _, out, _ := s.downloadMedia(context.Background(), nil, downloadIn{Chat: "me", MessageID: 5}); out.Status == "done" {
+						break
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+			} else {
+				s.downloads.Shutdown()
+			}
+			if left := jr.paths(); len(left) != 0 {
+				t.Errorf("journal after %s = %v, want empty", end, left)
+			}
+			if _, err := os.Stat(open[0]); !os.IsNotExist(err) {
+				t.Errorf("temp file after %s: %v", end, err)
+			}
+		})
+	}
+}
+
+func evalDir(t *testing.T, dir string) string {
+	t.Helper()
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return real
+}

@@ -113,8 +113,21 @@ func (s *Server) downloadMedia(ctx context.Context, _ *mcp.CallToolRequest, in d
 // runDownload is the body of a download job, on the server's context. It
 // writes the job's one audit line when it ends, whoever is still waiting.
 func (s *Server) runDownload(ctx context.Context, j *job, f tele.MediaFile, dir, name string, in downloadIn) (string, error) {
-	var path string
+	var path, tmp string
 	var err error
+	// journal records the temp file before anything is written to it, so a
+	// killed server's next start can remove it. The journal outlives a
+	// cancelled job: shutdown must still be able to clear the entry.
+	journal := func(w interface{ TempPath() string }) error {
+		if s.downloads.Journal == nil {
+			return nil
+		}
+		if err := s.downloads.Journal.Add(context.WithoutCancel(ctx), w.TempPath()); err != nil {
+			return fmt.Errorf("record the partial file: %w", err)
+		}
+		tmp = w.TempPath()
+		return nil
+	}
 	if f.Info.Size > 0 {
 		// Parts arrive out of order; the file is kept only if all of them came.
 		refetch := func(ctx context.Context) (tele.MediaFile, error) {
@@ -122,6 +135,9 @@ func (s *Server) runDownload(ctx context.Context, j *job, f tele.MediaFile, dir,
 		}
 		path, err = fsguard.WriteNewAt(dir, name, f.Info.Size, s.policy.MaxDownload, tele.DownloadPartSize,
 			func(w *fsguard.PartWriter) error {
+				if err := journal(w); err != nil {
+					return err
+				}
 				j.setProgress(w)
 				if err := s.svc.DownloadFile(ctx, f, w, refetch); err != nil {
 					return err
@@ -133,17 +149,27 @@ func (s *Server) runDownload(ctx context.Context, j *job, f tele.MediaFile, dir,
 	} else {
 		// Unknown size: stream in order, bounded by the limit as it grows.
 		path, err = fsguard.WriteNew(dir, name, s.policy.MaxDownload, func(w io.Writer) error {
+			if t, ok := w.(interface{ TempPath() string }); ok {
+				if err := journal(t); err != nil {
+					return err
+				}
+			}
 			if err := s.svc.Download(ctx, f.DC, f.Location, w); err != nil {
 				return err
 			}
 			return ctx.Err()
 		})
 	}
+	// The temp file is gone now (linked or removed), so is its entry. A
+	// stale entry is harmless: the startup sweep finds no file to remove.
+	if tmp != "" {
+		_ = s.downloads.Journal.Remove(context.WithoutCancel(ctx), tmp)
+	}
 	if errors.Is(err, fsguard.ErrTooLarge) {
 		err = fmt.Errorf("file is larger than max_download_mb (%d MB)", s.policy.MaxDownload>>20)
 	}
-	if errors.Is(err, context.Canceled) && s.downloads.ctx.Err() != nil {
-		err = fmt.Errorf("canceled: server stopped")
+	if err != nil && ctx.Err() != nil {
+		err = context.Cause(ctx) // server stopped, stalled or too long
 	}
 	err = s.record(audit.Entry{Tool: "download_media", ChatID: f.Info.ChatID, IDs: []int{in.MessageID}, Path: path}, err)
 	return path, err

@@ -34,6 +34,7 @@ import (
 	"github.com/itskamol/telegram-mcp-go/internal/audit"
 	"github.com/itskamol/telegram-mcp-go/internal/config"
 	"github.com/itskamol/telegram-mcp-go/internal/feed"
+	"github.com/itskamol/telegram-mcp-go/internal/fsguard"
 	"github.com/itskamol/telegram-mcp-go/internal/hub"
 	"github.com/itskamol/telegram-mcp-go/internal/install"
 	"github.com/itskamol/telegram-mcp-go/internal/login"
@@ -271,6 +272,8 @@ func runServe(ctx context.Context, args []string) error {
 			// One download registry for both servers, on the client's context:
 			// a read-only and a full session must not fetch one file twice.
 			downloads := mcpserver.NewDownloads(ctx)
+			downloads.Log = log
+			downloads.Journal = sweepPartials(ctx, e, log)
 			full := mcpserver.New(svc, policy, auditLog, version, feedTool, downloads)
 			policy.ReadOnly = true
 			readOnlySrv := mcpserver.New(svc, policy, auditLog, version, feedTool, downloads)
@@ -588,4 +591,20 @@ func runWatch(ctx context.Context, args []string) error {
 		Log: slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
 	return w.Run(ctx)
+}
+
+// sweepPartials removes the temp files of downloads a killed server left
+// behind, and returns the journal that records the next ones. It runs in
+// the primary before any download starts.
+func sweepPartials(ctx context.Context, e *env, log *slog.Logger) *storage.Partials {
+	partials := storage.NewPartials(e.db, e.account)
+	paths, err := partials.Take(ctx)
+	if err != nil {
+		log.Warn("read partial downloads", "err", err)
+		return partials
+	}
+	if removed := fsguard.SweepParts(e.cfg.AllowedRoots, paths); len(removed) > 0 {
+		log.Info("removed partial downloads of a previous run", "files", len(removed))
+	}
+	return partials
 }

@@ -294,11 +294,14 @@ max_upload_mb = 50                       # per send_file file
   Data goes to a hidden `.telegram-mcp-*.part` file next to the target and
   becomes visible only when every part has arrived.
 - A download that does not finish within about 45 s goes on inside the
-  server (at most 2 at a time): `download_media` answers
+  server (at most 2 at a time, at most 1 hour each, and ended if no data
+  arrives for 2 minutes): `download_media` answers
   `status: "downloading"` with the bytes so far, and the same call later
   returns progress or the path. A message is never downloaded twice at once.
   Stopping the server cancels running downloads and removes their partial
-  files. One audit line is written per download, when it ends.
+  files; after a crash, the next start removes them (only files named
+  `.telegram-mcp-*.part` that it recorded, inside `allowed_roots`). One
+  audit line is written per download, when it ends.
 - `send_file` is the risky direction (local files leave the machine), so it
   only reads regular files inside `allowed_roots`, refuses hidden paths such
   as `.env` or `.ssh/` (also through symlinks), and checks that the file it

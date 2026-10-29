@@ -111,7 +111,7 @@ func within(root, path string) bool {
 // nothing behind. It returns the final path.
 func WriteNew(dir, name string, limit int64, write func(io.Writer) error) (string, error) {
 	return writeNew(dir, name, func(f *os.File) error {
-		return write(&limitWriter{w: f, left: limit})
+		return write(&limitWriter{w: f, left: limit, tmp: f.Name()})
 	})
 }
 
@@ -154,7 +154,11 @@ func writeNew(dir, name string, fill func(*os.File) error) (string, error) {
 type limitWriter struct {
 	w    io.Writer
 	left int64
+	tmp  string
 }
+
+// TempPath is the hidden temp file being written, for a crash journal.
+func (l *limitWriter) TempPath() string { return l.tmp }
 
 func (l *limitWriter) Write(p []byte) (int, error) {
 	if int64(len(p)) > l.left {

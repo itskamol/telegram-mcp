@@ -3,6 +3,8 @@ package mcpserver
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -19,11 +21,20 @@ const (
 	// downloadResultTTL is how long a finished download is remembered for
 	// the calls that poll it.
 	downloadResultTTL = 30 * time.Minute
+	// downloadStall ends a job that has written nothing for this long.
+	downloadStall = 2 * time.Minute
+	// downloadMaxDuration ends a job however it is going.
+	downloadMaxDuration = time.Hour
+	// shutdownWait is how long Shutdown waits for jobs it cancelled.
+	shutdownWait = 10 * time.Second
 )
 
 var (
 	errTooManyDownloads = errors.New("2 downloads are already running; try again when one finishes")
 	errStopping         = errors.New("the server is stopping")
+	errServerStopped    = errors.New("canceled: server stopped")
+	errStalled          = errors.New("download stalled")
+	errTooLong          = errors.New("download took too long")
 )
 
 // jobKey identifies a download: one job per message, whatever dir or name.
@@ -72,11 +83,24 @@ func (j *job) result() (string, error) { return j.path, j.err }
 // ends only stops waiting. Every MCP server of the process shares one, so
 // a read-only and a full session never download the same message twice.
 type Downloads struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	wait   time.Duration
-	ttl    time.Duration
-	now    func() time.Time
+	// Log gets a line when Shutdown gives up on jobs; nil logs nothing.
+	Log *slog.Logger
+
+	ctx          context.Context
+	cancel       context.CancelCauseFunc
+	wait         time.Duration
+	ttl          time.Duration
+	stall        time.Duration
+	maxDuration  time.Duration
+	shutdownWait time.Duration
+	now          func() time.Time
+
+	// Journal records each job's temp file while it exists, so a killed
+	// server's next start can remove it; nil records nothing.
+	Journal interface {
+		Add(ctx context.Context, path string) error
+		Remove(ctx context.Context, path string) error
+	}
 
 	mu      sync.Mutex
 	jobs    map[jobKey]*job
@@ -88,8 +112,9 @@ type Downloads struct {
 // NewDownloads returns a registry whose jobs live until ctx ends or
 // Shutdown is called.
 func NewDownloads(ctx context.Context) *Downloads {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 	return &Downloads{ctx: ctx, cancel: cancel, wait: downloadWait, ttl: downloadResultTTL,
+		stall: downloadStall, maxDuration: downloadMaxDuration, shutdownWait: shutdownWait,
 		now: time.Now, jobs: map[jobKey]*job{}}
 }
 
@@ -123,7 +148,16 @@ func (d *Downloads) start(key jobKey, info jobInfo, run func(context.Context, *j
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
-		path, err := run(d.ctx, j)
+		ctx, cancel := context.WithCancelCause(d.ctx)
+		defer cancel(nil)
+		ctx, cancelTimeout := context.WithTimeoutCause(ctx, d.maxDuration,
+			fmt.Errorf("%w: over %s", errTooLong, d.maxDuration))
+		defer cancelTimeout()
+		go d.watch(ctx, cancel, j)
+		path, err := run(ctx, j)
+		if err != nil && ctx.Err() != nil {
+			err = context.Cause(ctx) // why it was cancelled, not just that it was
+		}
 		d.mu.Lock()
 		j.path, j.err, j.finished = path, err, d.now()
 		d.running--
@@ -131,6 +165,26 @@ func (d *Downloads) start(key jobKey, info jobInfo, run func(context.Context, *j
 		close(j.done)
 	}()
 	return j, nil
+}
+
+// watch cancels j's context if j writes nothing for the stall time.
+func (d *Downloads) watch(ctx context.Context, cancel context.CancelCauseFunc, j *job) {
+	t := time.NewTicker(d.stall / 4)
+	defer t.Stop()
+	last, since := j.downloaded(), time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if n := j.downloaded(); n != last {
+			last, since = n, time.Now()
+		} else if time.Since(since) >= d.stall {
+			cancel(fmt.Errorf("%w: no data for %s", errStalled, d.stall))
+			return
+		}
+	}
 }
 
 // fileIs reports whether path is a regular file of size bytes.
@@ -152,13 +206,26 @@ func (d *Downloads) forget(j *job) {
 
 // Shutdown cancels every running job and waits for them to end; their
 // partial files are removed and their audit lines written before it
-// returns. Nothing starts after it.
+// returns. Nothing starts after it. A job still running after the wait
+// limit is abandoned and logged: the startup sweep removes its file.
 func (d *Downloads) Shutdown() {
 	d.mu.Lock()
 	d.closed = true
 	d.mu.Unlock()
-	d.cancel()
-	d.wg.Wait()
+	d.cancel(errServerStopped)
+
+	done := make(chan struct{})
+	go func() { d.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(d.shutdownWait):
+		d.mu.Lock()
+		running := d.running
+		d.mu.Unlock()
+		if d.Log != nil {
+			d.Log.Warn("downloads abandoned at shutdown", "running", running, "waited", d.shutdownWait)
+		}
+	}
 }
 
 // waitFor waits for j until it is done, the wait is over, or ctx ends,
