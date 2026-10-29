@@ -126,9 +126,13 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, 
 	add(srv, "download_media", "Download Media", writeLocal,
 		"Save a message's attachment to disk and return its path. Allowed directories: "+roots+
 			". dir defaults to the first one; a relative dir is inside it. Existing files are never overwritten. "+
-			"A large file may answer status=downloading with the bytes so far: it goes on in the server, so call again "+
-			"with the same chat and message_id for progress or, once status=done, the final path. It is never "+
-			"downloaded twice at once; while it runs, a different dir or file_name is ignored.", s.downloadMedia)
+			"A large file may answer status=downloading with the bytes so far and eta_seconds: it goes on in the "+
+			"server, so call again with the same chat and message_id for progress or, once status=done, the final "+
+			"path. If you can run shell commands, prefer `telegram-mcp download --chat <chat> --message <id> "+
+			"[--dir <dir>]`: it does the same through this server, waits until the file is done, prints its path "+
+			"and exits (non-zero on failure), so it can run in the background. Do not poll the file: it appears "+
+			"only when complete, possibly as \"name (1)\". A message is never downloaded twice at once; while "+
+			"it runs, a different dir or file_name is ignored.", s.downloadMedia)
 
 	if fd != nil {
 		add(srv, "get_new_messages", "Get New Messages", readTelegram,

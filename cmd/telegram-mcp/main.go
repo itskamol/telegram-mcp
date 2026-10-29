@@ -36,6 +36,7 @@ import (
 
 	"github.com/itskamol/telegram-mcp-go/internal/audit"
 	"github.com/itskamol/telegram-mcp-go/internal/config"
+	"github.com/itskamol/telegram-mcp-go/internal/dlclient"
 	"github.com/itskamol/telegram-mcp-go/internal/feed"
 	"github.com/itskamol/telegram-mcp-go/internal/fsguard"
 	"github.com/itskamol/telegram-mcp-go/internal/hub"
@@ -60,6 +61,9 @@ Usage:
   telegram-mcp logout [--account name]
   telegram-mcp install claude-desktop|claude-code [--name telegram] [--read-only] [--force]
   telegram-mcp watch  [--consumer default] [--account name]   wake an agent on new messages (below)
+  telegram-mcp download --chat <chat> --message <id> [--dir d] [--file-name n] [--account name]
+                     download a message's attachment through the running server; waits
+                     until done, prints the path (exit 1 on failure)
   telegram-mcp update [--check] [--version v0.9.2]   replace this binary with a release
   telegram-mcp version
 
@@ -101,6 +105,8 @@ func main() {
 		err = runLogout(ctx, args)
 	case "update":
 		err = runUpdate(ctx, args)
+	case "download":
+		err = runDownload(ctx, args)
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -683,5 +689,55 @@ func runUpdate(ctx context.Context, args []string) error {
 	fmt.Printf("Updated %s: %s -> %s\n", exe, version, target)
 	fmt.Println("Restart the MCP clients that use it (Claude Desktop, Claude Code sessions) and any " +
 		"`telegram-mcp watch`, so they run the new version: a new relay does not talk to an old server.")
+	return nil
+}
+
+// runDownload downloads a message's attachment through the running
+// server, like the download_media tool, and waits until it is done: an
+// agent can run it in the background and be told when it exits, instead
+// of polling the file. It opens no Telegram connection (one per profile)
+// and uses the read-only socket, which serves download_media and nothing
+// that changes Telegram.
+func runDownload(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("download", flag.ContinueOnError)
+	account := fs.String("account", config.DefaultAccount, "account label")
+	chat := fs.String("chat", "", "chat id, @username or me (required)")
+	msg := fs.Int("message", 0, "id of the message with the attachment (required)")
+	dir := fs.String("dir", "", "directory inside allowed_roots; default the first one")
+	name := fs.String("file-name", "", "file name; default the original name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *chat == "" || *msg <= 0 {
+		return errors.New("usage: telegram-mcp download --chat <chat> --message <id> [--dir d] [--file-name n]")
+	}
+	if err := config.ValidateAccount(*account); err != nil {
+		return err
+	}
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	cs, err := hub.Connect(ctx, hub.SocketPath(paths.DataDir, *account, version, true), 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer cs.Close()
+
+	call := map[string]any{"chat": *chat, "message_id": *msg}
+	if *dir != "" {
+		call["dir"] = *dir
+	}
+	if *name != "" {
+		call["file_name"] = *name
+	}
+	path, err := dlclient.Run(ctx, cs, call, os.Stderr)
+	if errors.Is(err, context.Canceled) {
+		return errors.New("stopped waiting; the download goes on in the server, run the same command again to wait for it")
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Println(path)
 	return nil
 }

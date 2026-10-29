@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -63,6 +64,10 @@ type downloadOut struct {
 	Size       int64  `json:"size"`
 	Downloaded int64  `json:"downloaded,omitempty"` // bytes so far, while downloading
 	MimeType   string `json:"mime_type,omitempty"`
+	// While downloading: seconds left at the speed so far (0 = not known
+	// yet), and what to do next, so an agent does not poll the file.
+	EtaSeconds int64  `json:"eta_seconds,omitempty"`
+	Next       string `json:"next,omitempty"`
 }
 
 func (s *Server) downloadMedia(ctx context.Context, _ *mcp.CallToolRequest, in downloadIn) (*mcp.CallToolResult, downloadOut, error) {
@@ -99,8 +104,15 @@ func (s *Server) downloadMedia(ctx context.Context, _ *mcp.CallToolRequest, in d
 	select {
 	case <-j.done:
 	default:
+		got := j.downloaded()
 		return nil, downloadOut{Status: "downloading", Path: j.info.planned, Size: j.info.size,
-			Downloaded: j.downloaded(), MimeType: j.info.mime}, nil
+			Downloaded: got, MimeType: j.info.mime,
+			EtaSeconds: etaSeconds(got, j.info.size, time.Since(j.started)),
+			Next: fmt.Sprintf("Not done yet. Call download_media again with the same chat and message_id; "+
+				"each call waits up to about 45 s. From a shell, `telegram-mcp download --chat %s --message %d` "+
+				"waits until it is done and prints the path. Do not poll the file: it appears at path "+
+				"(or a \"name (1)\" variant) only when complete.", in.Chat, in.MessageID),
+		}, nil
 	}
 	path, err := j.result()
 	if err != nil {

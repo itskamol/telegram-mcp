@@ -177,3 +177,35 @@ func TestSocketPathVersionIsSafe(t *testing.T) {
 		t.Fatalf("version escaped the directory: %s", p)
 	}
 }
+
+// A command such as `telegram-mcp download` talks MCP to the running
+// server over its socket, without a Telegram connection of its own.
+func TestConnect(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := shortDir(t)
+	path := SocketPath(dir, "default", "1.0", true)
+	ln, err := Listen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer cancel()
+	wg.Go(func() { Serve(ctx, ln, newServer("echo"), slog.Default()) })
+
+	cs, err := Connect(ctx, path, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "hi"}})
+	if err != nil || res.Content[0].(*mcp.TextContent).Text != "echo:hi" {
+		t.Fatalf("CallTool = %+v, %v", res, err)
+	}
+
+	if _, err := Connect(ctx, SocketPath(dir, "nobody", "1.0", true), 300*time.Millisecond); err == nil ||
+		!strings.Contains(err.Error(), "no telegram-mcp server") {
+		t.Errorf("Connect with no server: %v, want a clear 'no telegram-mcp server' error", err)
+	}
+}

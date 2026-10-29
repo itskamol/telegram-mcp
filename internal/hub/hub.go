@@ -190,3 +190,25 @@ func dial(ctx context.Context, path string, wait time.Duration) (net.Conn, error
 		}
 	}
 }
+
+// Connect opens an MCP session to the primary over its socket, for a
+// command that uses the running server instead of a Telegram connection
+// of its own (one per profile). It fails at once when no server of this
+// version is running.
+func Connect(ctx context.Context, path string, wait time.Duration) (*mcp.ClientSession, error) {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) && len(otherVersions(path)) == 0 {
+		return nil, errors.New("no telegram-mcp server is running for this profile; it runs inside an MCP client " +
+			"(Claude Desktop, Claude Code): start one, then try again")
+	}
+	conn, err := dial(ctx, path, wait)
+	if err != nil {
+		return nil, err
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "telegram-mcp-cli"}, nil).
+		Connect(ctx, &mcp.IOTransport{Reader: conn, Writer: conn}, nil)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("connect to running server: %w", err)
+	}
+	return cs, nil
+}

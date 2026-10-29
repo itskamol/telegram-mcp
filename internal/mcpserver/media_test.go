@@ -433,3 +433,63 @@ func evalDir(t *testing.T, dir string) string {
 	}
 	return real
 }
+
+// A "downloading" answer tells the agent what to do next, in the answer
+// itself: call again, or run the CLI that waits, and not poll the file,
+// which appears only when complete.
+func TestDownloadingAnswerSaysWhatNext(t *testing.T) {
+	s, _, _, far := background(t)
+	_, out, err := s.downloadMedia(context.Background(), nil, downloadIn{Chat: "me", MessageID: 5})
+	if err != nil || out.Status != "downloading" {
+		t.Fatalf("first call: %+v %v", out, err)
+	}
+	for _, want := range []string{"download_media", "telegram-mcp download --chat me --message 5", "not poll"} {
+		if !strings.Contains(out.Next, want) {
+			t.Errorf("next = %q, lacks %q", out.Next, want)
+		}
+	}
+	if out.EtaSeconds != 0 {
+		t.Errorf("eta_seconds = %d with nothing downloaded yet, want 0 (unknown)", out.EtaSeconds)
+	}
+	close(far.gate)
+}
+
+func TestETA(t *testing.T) {
+	cases := []struct {
+		downloaded, size int64
+		elapsed          time.Duration
+		want             int64
+	}{
+		{50, 100, 10 * time.Second, 10},
+		{25, 100, 10 * time.Second, 30},
+		{0, 100, 10 * time.Second, 0},        // no speed yet
+		{50, 100, 0, 0},                      // no time yet
+		{100, 100, 10 * time.Second, 0},      // done
+		{1, 100, 100 * time.Millisecond, 10}, // rounds up, never 0 while running
+	}
+	for _, c := range cases {
+		if got := etaSeconds(c.downloaded, c.size, c.elapsed); got != c.want {
+			t.Errorf("etaSeconds(%d, %d, %s) = %d, want %d", c.downloaded, c.size, c.elapsed, got, c.want)
+		}
+	}
+}
+
+// The tool description points shell-capable agents at the CLI.
+func TestDownloadDescriptionMentionsCLI(t *testing.T) {
+	cs := connect(t, Policy{AllowedRoots: []string{t.TempDir()}, MaxDownload: 1 << 20})
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range res.Tools {
+		if tool.Name == "download_media" {
+			for _, want := range []string{"telegram-mcp download", "do not poll"} {
+				if !strings.Contains(strings.ToLower(tool.Description), want) {
+					t.Errorf("description lacks %q: %s", want, tool.Description)
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("no download_media tool")
+}

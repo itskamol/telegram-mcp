@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,8 @@ type job struct {
 	info     jobInfo
 	done     chan struct{}
 	progress atomic.Pointer[progress]
+
+	started time.Time
 
 	// Set before done closes; read only after.
 	path     string
@@ -142,7 +145,7 @@ func (d *Downloads) start(key jobKey, info jobInfo, run func(context.Context, *j
 		return nil, errTooManyDownloads
 	}
 
-	j := &job{key: key, info: info, done: make(chan struct{})}
+	j := &job{key: key, info: info, done: make(chan struct{}), started: d.now()}
 	d.jobs[key] = j
 	d.running++
 	d.wg.Add(1)
@@ -244,4 +247,14 @@ func (d *Downloads) waitFor(ctx context.Context, j *job) error {
 		return ctx.Err()
 	}
 	return nil
+}
+
+// etaSeconds is how long the rest of size takes at the speed so far,
+// rounded up; 0 while there is no speed to go by, or nothing left.
+func etaSeconds(downloaded, size int64, elapsed time.Duration) int64 {
+	if downloaded <= 0 || elapsed <= 0 || downloaded >= size {
+		return 0
+	}
+	perSecond := float64(downloaded) / elapsed.Seconds()
+	return int64(math.Ceil(float64(size-downloaded) / perSecond))
 }

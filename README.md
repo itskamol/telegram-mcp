@@ -36,6 +36,22 @@ On Linux the session key is kept in the Secret Service (GNOME Keyring,
 KWallet) over D-Bus, so a desktop session or a running keyring daemon is
 needed; on a headless server `login` fails until one is available.
 
+### Downloads from a shell
+
+```bash
+telegram-mcp download --chat me --message 171862 [--dir sub] [--file-name name]
+```
+
+Downloads a message's attachment through the running server (the one an
+MCP client started), with the same limits and allowed directories as
+`download_media`, and waits until it is done: progress goes to stderr,
+the final path to stdout, and the exit status is 1 on failure. An agent
+that can run shell commands can start it in the background and be told
+when it exits, instead of calling `download_media` again and again or
+polling the file (which appears only when complete). It opens no
+Telegram connection of its own and uses the read-only socket. Stopping it
+stops the waiting only: the download goes on in the server.
+
 ### Update
 
 ```bash
