@@ -15,9 +15,12 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -40,6 +43,7 @@ import (
 	"github.com/itskamol/telegram-mcp-go/internal/login"
 	"github.com/itskamol/telegram-mcp-go/internal/mcpserver"
 	"github.com/itskamol/telegram-mcp-go/internal/secret"
+	"github.com/itskamol/telegram-mcp-go/internal/selfupdate"
 	"github.com/itskamol/telegram-mcp-go/internal/storage"
 	"github.com/itskamol/telegram-mcp-go/internal/tele"
 )
@@ -56,6 +60,7 @@ Usage:
   telegram-mcp logout [--account name]
   telegram-mcp install claude-desktop|claude-code [--name telegram] [--read-only] [--force]
   telegram-mcp watch  [--consumer default] [--account name]   wake an agent on new messages (below)
+  telegram-mcp update [--check] [--version v0.9.2]   replace this binary with a release
   telegram-mcp version
 
 watch prints one JSON line per chat with new or edited messages, ids only:
@@ -94,6 +99,8 @@ func main() {
 		err = runStatus(ctx, args)
 	case "logout":
 		err = runLogout(ctx, args)
+	case "update":
+		err = runUpdate(ctx, args)
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -607,4 +614,74 @@ func sweepPartials(ctx context.Context, e *env, log *slog.Logger) *storage.Parti
 		log.Info("removed partial downloads of a previous run", "files", len(removed))
 	}
 	return partials
+}
+
+// releases is where update looks for releases; install.sh uses the same.
+const releases = "https://github.com/itskamol/telegram-mcp"
+
+// runUpdate replaces this binary with the latest release, or the one
+// --version names, checked against the release's checksums.txt. A
+// Homebrew install is left to brew. Running servers keep the old binary
+// until their client restarts them.
+func runUpdate(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	check := fs.Bool("check", false, "only report whether a newer release exists")
+	want := fs.String("version", "", "install this release (e.g. v0.9.1) instead of the latest; also downgrades")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err != nil {
+		return fmt.Errorf("find this binary: %w", err)
+	}
+	src := selfupdate.Source{Repo: releases, HTTP: &http.Client{Timeout: 5 * time.Minute},
+		OS: runtime.GOOS, Arch: runtime.GOARCH}
+
+	target := *want
+	if target == "" {
+		latest, err := src.Latest(ctx)
+		if err != nil {
+			return err
+		}
+		newer, err := selfupdate.Newer(version, latest)
+		if err != nil {
+			return fmt.Errorf("%w; pass --version %s to install that release", err, latest)
+		}
+		if !newer {
+			fmt.Printf("telegram-mcp %s is up to date (latest release %s)\n", version, latest)
+			return nil
+		}
+		target = latest
+	} else if !strings.HasPrefix(target, "v") {
+		target = "v" + target
+	}
+
+	if selfupdate.Brew(exe) {
+		msg := fmt.Sprintf("telegram-mcp %s was installed by Homebrew; update it with: brew upgrade --cask telegram-mcp", version)
+		if *check {
+			fmt.Printf("%s is available. %s\n", target, msg)
+			return nil
+		}
+		return errors.New(msg)
+	}
+	if *check {
+		fmt.Printf("telegram-mcp %s: %s is available; run: telegram-mcp update\n", version, target)
+		return nil
+	}
+
+	fmt.Printf("Downloading telegram-mcp %s for %s/%s...\n", target, runtime.GOOS, runtime.GOARCH)
+	bin, err := src.Fetch(ctx, target)
+	if err != nil {
+		return err
+	}
+	if err := selfupdate.Replace(exe, bin); err != nil {
+		return err
+	}
+	fmt.Printf("Updated %s: %s -> %s\n", exe, version, target)
+	fmt.Println("Restart the MCP clients that use it (Claude Desktop, Claude Code sessions) and any " +
+		"`telegram-mcp watch`, so they run the new version: a new relay does not talk to an old server.")
+	return nil
 }
