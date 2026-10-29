@@ -207,7 +207,10 @@ A short chunk in the middle of a file (which Telegram should never send)
 would fail the "short only at the end" rule above instead of passing
 silently.
 
-Media with an unknown size (`f.Info.Size == 0`, rare) keeps the sequential
+`size` must be > 0: `WriteNewAt` refuses 0 (and negatives) before creating
+anything and never calls `write`. 0 is not "unknown" there, and not "an
+empty file" either, because a caller that confused the two would silently
+get an empty file. Media with an unknown size (`f.Info.Size == 0`, rare) keeps the sequential
 `Stream` into `WriteNew`, so `WriteNewAt` never has to guess the length.
 
 Every guarantee of `WriteNew` is kept:
@@ -221,7 +224,7 @@ Every guarantee of `WriteNew` is kept:
 | **Complete**, not just the right length | A file of the right length can still have a hole: if a middle part is never written and the last one is, the `.part` is a sparse file with a run of zero bytes and the correct size. So the length alone proves nothing. The writer tracks coverage (one bit per part; 200 MB = 200 bits). A `WriteAt(p, off)` is accepted only if `off % partSize == 0`, its part's bit is not yet set, `off+len(p) <= size`, and **either** `len(p) == partSize` **or** `len(p) < partSize` and `off+len(p) == size` (the last part; when `size` is an exact multiple of `partSize`, the last part is full-length and passes the first rule). `len(p)` is never more than `partSize`: one write that ends at `size` but spans two parts would otherwise mark only its first part. The bit is checked and set in **one** critical section, so two writers of the same part cannot both pass. Anything else (misaligned, short in the middle, past `size`, or a repeat) is an error. `len(p) == 0` is accepted as a no-op that sets no bit: gotd does not send it today (see below), and if a future version does, the final coverage check still catches any missing data. After `write` returns, every part's bit must be set **and** the atomic `written` counter must equal `size`, else an error and nothing is kept. Since writes cannot overlap, these two checks together mean every byte came from Telegram. |
 | `.part` then rename | Unchanged (link + remove, as above). |
 | Concurrency | `*os.File.WriteAt` is safe for concurrent use (`pwrite`); gotd also serialises through `syncio.NewWriterAt`. The part bitmap is under a small mutex; `written` is atomic (commit 2 reads it for progress). |
-| Restart (1.5) | `reset()` truncates the temp file to 0, clears the bitmap and sets `written` to 0, under the same mutex, while no write is running. |
+| Restart (1.5) | `Reset()` clears the bitmap and sets `written` to 0. **Contract, enforced:** `WriteAt` counts itself as in flight in the same critical section that marks its part, and uncounts after the disk write returns. `Reset` takes the mutex and, if any write is in flight, returns `ErrWriteInFlight` and changes nothing; otherwise it clears. So a write that marked its part before `Reset` can never land in the next attempt and inflate `written`. A `WriteAt` that has not yet reached its critical section when `Reset` runs is, by construction, a write of the new attempt; the refetch check (1.5) guarantees the same file, so its bytes are right, and if it duplicates a part the new attempt also writes, the sticky `ErrBadPart` fails the download: a failure, never a wrong file. `Reset` does **not** truncate: the coverage check already requires every part to be written again, so old bytes cannot survive (a mutation test confirmed truncation is not load-bearing), and not truncating keeps the file's blocks allocated for the second attempt. `Reset` keeps a sticky refusal: a refusal means the downloader and the part layout disagreed, which is a bug, not an expired reference, and a retry must not hide it. |
 
 ### 1.4 Flood waits
 
@@ -311,8 +314,11 @@ added, and both paths share the invoker selection and flood wrapper.
   → error; a part ending past `size` → error.
 - `WriteAt` with an empty slice → no error, no bit set; a file whose only
   "write" was empty fails the final check.
-- `reset()` after half the parts, then a full write → correct bytes,
-  `written == size`.
+- `Reset()` after some parts, then a full write → correct bytes,
+  `Written() == 0` right after `Reset`.
+- `Reset()` while a write is inside its disk write → `ErrWriteInFlight`,
+  file untouched; after the write returns, `Reset` works.
+- `size` 0 or negative → error, `write` never called, nothing created.
 - Existing `name` → result is `name (1)`; the existing file is untouched.
 - Existing tests for `WriteNew` keep passing (shared helper).
 
@@ -449,6 +455,16 @@ session start two copies of the same file.
   bitmap check and one `os.Link`; a job that passed the check before
   step 1 links and writes its audit line in that time, long before the
   10 s limit below. So a finished file without an audit line cannot appear.
+
+  This is a **timing argument**, not a mechanism: the check and the link are
+  a check-then-act pair, and the argument holds only while `Close` + `os.Link`
+  take less than the 10 s abandonment limit. It breaks on a filesystem where
+  `link` can hang (a stale NFS or SMB mount, a disk in error recovery): a job
+  stuck in `os.Link` past 10 s is abandoned, the audit file is closed, and
+  the link may then complete with no audit line. Accepted, because
+  `allowed_roots` on such a mount is unusual and the stderr log names the
+  abandoned job; a strict fix would hold the audit log open until every job
+  goroutine has exited, at the cost of an unbounded shutdown.
 
   Step 2 has a 10 s limit: a job stuck past it is logged to
   stderr and abandoned. This is the one accepted exception to the order:
