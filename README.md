@@ -1,4 +1,4 @@
-# telegram-mcp (Go)
+# telegram-mcp
 
 A Telegram [MCP](https://modelcontextprotocol.io) server shipped as one static
 binary: no Python, no `uv`, no Docker. It is a focused Go rewrite inspired by
