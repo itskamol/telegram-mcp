@@ -40,8 +40,49 @@ type PartSink interface {
 
 // DownloadFile writes f to w in parallel on f's DC. refetch reloads the
 // message when the file reference expired.
+//
+// File references expire. On FILE_REFERENCE_EXPIRED the message is fetched
+// again and, if it still holds the same file, the download restarts once
+// from the start (Parallel cannot resume at an offset). Any error from
+// w.Reset ends the download: it means a write of the first attempt is still
+// running, which is a bug, not something to wait out.
 func (s *Service) DownloadFile(ctx context.Context, f MediaFile, w PartSink,
 	refetch func(context.Context) (MediaFile, error)) error {
+	err := s.downloadOnce(ctx, f, w)
+	if !tgerr.Is(err, "FILE_REFERENCE_EXPIRED") {
+		return err
+	}
+	now, ferr := refetch(ctx)
+	if ferr != nil {
+		return fmt.Errorf("fetch the message again after its file reference expired: %w", ferr)
+	}
+	if !sameFile(f, now) {
+		return ErrFileChanged
+	}
+	if err := w.Reset(); err != nil {
+		return err
+	}
+	return s.downloadOnce(ctx, now, w)
+}
+
+// sameFile reports whether b is the file a was: same kind, id, thumbnail
+// and size. Only the file reference may differ.
+func sameFile(a, b MediaFile) bool {
+	if a.Info.Size != b.Info.Size {
+		return false
+	}
+	switch la := a.Location.(type) {
+	case *tg.InputDocumentFileLocation:
+		lb, ok := b.Location.(*tg.InputDocumentFileLocation)
+		return ok && la.ID == lb.ID && la.ThumbSize == lb.ThumbSize
+	case *tg.InputPhotoFileLocation:
+		lb, ok := b.Location.(*tg.InputPhotoFileLocation)
+		return ok && la.ID == lb.ID && la.ThumbSize == lb.ThumbSize
+	}
+	return false
+}
+
+func (s *Service) downloadOnce(ctx context.Context, f MediaFile, w io.WriterAt) error {
 	api, err := s.fileAPI(ctx, f.DC)
 	if err != nil {
 		return err
@@ -208,3 +249,7 @@ func (f floodLimit) Invoke(ctx context.Context, in bin.Encoder, out bin.Decoder)
 	}
 	return err
 }
+
+// ErrFileChanged means the message's file is no longer the one whose
+// download started.
+var ErrFileChanged = errors.New("the message's file changed during the download; call again")

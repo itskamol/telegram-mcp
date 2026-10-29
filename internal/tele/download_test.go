@@ -23,6 +23,10 @@ const homeDC = 2
 type fileDC struct {
 	data   []byte
 	floods map[int64]string // offset -> flood error type_seconds, answered once
+	// expired is a file reference that has expired for parts at or past
+	// expiredFrom: they get FILE_REFERENCE_EXPIRED, earlier parts are served.
+	expired     []byte
+	expiredFrom int64
 
 	mu       sync.Mutex
 	requests []*tg.UploadGetFileRequest
@@ -44,6 +48,10 @@ func (d *fileDC) Invoke(_ context.Context, in bin.Encoder, out bin.Decoder) erro
 	d.mu.Unlock()
 	if isFlood {
 		return tgerr.New(420, flood)
+	}
+	if loc, ok := req.Location.(*tg.InputDocumentFileLocation); ok && d.expired != nil &&
+		bytes.Equal(loc.FileReference, d.expired) && req.Offset >= d.expiredFrom {
+		return tgerr.New(400, "FILE_REFERENCE_EXPIRED")
 	}
 
 	if req.Limit != downloadPartSize {
@@ -109,10 +117,13 @@ func (p *fakePools) DC(_ context.Context, dc int, max int64) (telegram.CloseInvo
 
 func (p *fakePools) Config() tg.Config { return tg.Config{ThisDC: p.this} }
 
-// memSink is an in-memory PartSink.
+// memSink is an in-memory PartSink. onReset, if set, runs at each Reset
+// and its error is Reset's.
 type memSink struct {
-	mu  sync.Mutex
-	buf []byte
+	mu      sync.Mutex
+	buf     []byte
+	resets  int
+	onReset func() error
 }
 
 func (m *memSink) WriteAt(p []byte, off int64) (int, error) {
@@ -127,6 +138,12 @@ func (m *memSink) WriteAt(p []byte, off int64) (int, error) {
 func (m *memSink) Reset() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.resets++
+	if m.onReset != nil {
+		if err := m.onReset(); err != nil {
+			return err
+		}
+	}
 	m.buf = nil
 	return nil
 }
