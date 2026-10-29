@@ -25,10 +25,11 @@ const (
 	downloadConcurrency = 8
 )
 
-// Pools opens connections to other DCs and reports the home DC;
-// *telegram.Client satisfies it.
+// Pools opens connections to other DCs and to the home DC, and reports
+// the home DC; *telegram.Client satisfies it.
 type Pools interface {
 	DC(ctx context.Context, dc int, max int64) (telegram.CloseInvoker, error)
+	Pool(max int64) (telegram.CloseInvoker, error)
 	Config() tg.Config
 }
 
@@ -146,17 +147,25 @@ type dcEntry struct {
 	err  error
 }
 
-// fileAPI returns the client to fetch a file stored on dc. Files on other
-// DCs go straight to a pool there: through the home connection every part
-// would first be refused with FILE_MIGRATE. While the home DC is unknown
-// (0), or the file's DC is, the home connection is used, so a pool is never
-// opened on the home DC with the primary key.
+// fileAPI returns the client to fetch a file stored on dc, always through
+// a pool of downloadConcurrency connections to that DC:
+//   - another DC: through the primary connection every part would first be
+//     refused with FILE_MIGRATE;
+//   - the home DC: Telegram limits the speed of each connection, so one
+//     connection is measured at 1.4-2.4x slower than a pool. The pool uses
+//     the primary key with sessions of its own, as official apps do; if it
+//     cannot be opened, the primary connection is used for this download.
+//
+// While the home DC is unknown (0), or the file's DC is, the primary
+// connection is used.
 func (s *Service) fileAPI(ctx context.Context, dc int) (downloader.Client, error) {
+	primary := tg.NewClient(floodLimit{s.API.Invoker()})
 	if s.Pools == nil || dc == 0 {
-		return tg.NewClient(floodLimit{s.API.Invoker()}), nil
+		return primary, nil
 	}
-	if home := s.Pools.Config().ThisDC; home == 0 || dc == home {
-		return tg.NewClient(floodLimit{s.API.Invoker()}), nil
+	home := s.Pools.Config().ThisDC
+	if home == 0 {
+		return primary, nil
 	}
 
 	c := &s.dcs
@@ -176,7 +185,7 @@ func (s *Service) fileAPI(ctx context.Context, dc int) (downloader.Client, error
 		e = &dcEntry{done: make(chan struct{})}
 		c.entries[dc] = e
 		c.openers.Add(1)
-		go s.openDC(dc, e)
+		go s.openDC(dc, dc == home, e)
 	}
 	c.mu.Unlock()
 
@@ -186,22 +195,32 @@ func (s *Service) fileAPI(ctx context.Context, dc int) (downloader.Client, error
 		return nil, ctx.Err()
 	}
 	if e.err != nil {
+		if dc == home && !errors.Is(e.err, errServiceClosed) {
+			return primary, nil // slower, but the download still works
+		}
 		return nil, e.err
 	}
 	return tg.NewClient(floodLimit{e.pool}), nil
 }
 
-// openDC opens dc's pool for e. A failure is not cached: the entry is
+// openDC opens dc's pool for e: Pool for the home DC, which needs no auth
+// transfer, DC for any other. A failure is not cached: the entry is
 // dropped, so the next download tries again. A pool that arrives after
 // Close is closed here, since Close has already collected the others.
-func (s *Service) openDC(dc int, e *dcEntry) {
+func (s *Service) openDC(dc int, home bool, e *dcEntry) {
 	c := &s.dcs
 	defer c.openers.Done()
 	defer close(e.done) // after the fields below are set, on every path
 
 	ctx, cancel := context.WithTimeout(c.ctx, poolOpenTimeout)
 	defer cancel()
-	pool, err := s.Pools.DC(ctx, dc, downloadConcurrency)
+	var pool telegram.CloseInvoker
+	var err error
+	if home {
+		pool, err = s.Pools.Pool(downloadConcurrency)
+	} else {
+		pool, err = s.Pools.DC(ctx, dc, downloadConcurrency)
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()

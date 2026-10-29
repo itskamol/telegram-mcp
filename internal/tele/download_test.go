@@ -3,6 +3,7 @@ package tele
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -96,14 +97,18 @@ func (d *fileDC) calls() int {
 	return len(d.requests) + len(d.other)
 }
 
-// fakePools hands out one fileDC per DC and records each DC call.
+// fakePools hands out one fileDC per DC and records each DC call; home is
+// what Pool hands out for the home DC, poolErr what it fails with.
 type fakePools struct {
-	dcs  map[int]*fileDC
-	this int // Config().ThisDC
+	dcs     map[int]*fileDC
+	this    int // Config().ThisDC
+	home    *fileDC
+	poolErr error
 
-	mu     sync.Mutex
-	opened []int   // dc of each DC call
-	max    []int64 // max of each DC call
+	mu      sync.Mutex
+	opened  []int   // dc of each DC call
+	max     []int64 // max of each DC call
+	homeMax []int64 // max of each Pool call
 }
 
 func (p *fakePools) DC(_ context.Context, dc int, max int64) (telegram.CloseInvoker, error) {
@@ -116,6 +121,19 @@ func (p *fakePools) DC(_ context.Context, dc int, max int64) (telegram.CloseInvo
 		return nil, fmt.Errorf("fakePools: no DC %d", dc)
 	}
 	return d, nil
+}
+
+func (p *fakePools) Pool(max int64) (telegram.CloseInvoker, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.homeMax = append(p.homeMax, max)
+	if p.poolErr != nil {
+		return nil, p.poolErr
+	}
+	if p.home == nil {
+		return nil, fmt.Errorf("fakePools: no home pool")
+	}
+	return p.home, nil
 }
 
 func (p *fakePools) Config() tg.Config { return tg.Config{ThisDC: p.this} }
@@ -167,8 +185,9 @@ func noRefetch(context.Context) (MediaFile, error) {
 // the home connection, so no request can come back with FILE_MIGRATE. The
 // pool is sized to the request concurrency (a pool connection carries one
 // request at a time), opened once, and closed by Close. A file on the home
-// DC, or on any DC while the home DC is not known yet, uses the home
-// connection and opens no pool.
+// DC goes to a pool of its own on the home DC: one connection is held to a
+// per-connection speed limit, measured at about 1.4-2.4x slower. While the
+// home DC is not known yet, the primary connection is used and no pool opens.
 func TestDownloadFileRoutesToFileDC(t *testing.T) {
 	ctx := context.Background()
 	data := fileData(2<<20 + 512<<10) // three parts, the last one short
@@ -211,26 +230,68 @@ func TestDownloadFileRoutesToFileDC(t *testing.T) {
 		}
 	})
 
-	for _, c := range []struct {
-		name     string
-		this, dc int
-	}{
-		{"home DC", homeDC, homeDC},
-		{"home DC not known yet", 0, 4},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			home := &fileDC{data: data}
-			pools := &fakePools{dcs: map[int]*fileDC{4: {data: data}}, this: c.this}
-			s := &Service{API: tg.NewClient(home), Pools: pools}
+	t.Run("home DC", func(t *testing.T) {
+		primary, homePool := &fileDC{data: data}, &fileDC{data: data}
+		pools := &fakePools{dcs: map[int]*fileDC{}, this: homeDC, home: homePool}
+		s := &Service{API: tg.NewClient(primary), Pools: pools}
 
-			download(t, s, c.dc)
-			if len(pools.opened) != 0 {
-				t.Errorf("pools opened %v, want none", pools.opened)
-			}
-			if home.calls() == 0 {
-				t.Error("home connection got no requests")
-			}
-		})
+		download(t, s, homeDC)
+		download(t, s, homeDC)
+		if n := primary.calls(); n != 0 {
+			t.Errorf("primary connection got %d requests, want 0", n)
+		}
+		if len(pools.homeMax) != 1 || pools.homeMax[0] != downloadConcurrency {
+			t.Errorf("home pool opened %v, want once with max %d", pools.homeMax, downloadConcurrency)
+		}
+		if len(pools.opened) != 0 {
+			t.Errorf("DC pools opened %v for a home-DC file, want none", pools.opened)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if !homePool.closed {
+			t.Error("Close did not close the home pool")
+		}
+	})
+
+	t.Run("home DC not known yet", func(t *testing.T) {
+		primary := &fileDC{data: data}
+		pools := &fakePools{dcs: map[int]*fileDC{4: {data: data}}, this: 0, home: &fileDC{data: data}}
+		s := &Service{API: tg.NewClient(primary), Pools: pools}
+
+		download(t, s, 4)
+		if len(pools.opened) != 0 || len(pools.homeMax) != 0 {
+			t.Errorf("pools opened %v, home pool %v, want none", pools.opened, pools.homeMax)
+		}
+		if primary.calls() == 0 {
+			t.Error("primary connection got no requests")
+		}
+	})
+}
+
+// If the home pool cannot be opened, home-DC files still download over the
+// primary connection, and the next download tries the pool again.
+func TestDownloadFileHomePoolFallback(t *testing.T) {
+	data := fileData(1500)
+	primary, homePool := &fileDC{data: data}, &fileDC{data: data}
+	pools := &fakePools{this: homeDC, home: homePool, poolErr: errors.New("dial failed")}
+	s := &Service{API: tg.NewClient(primary), Pools: pools}
+	f := MediaFile{Info: MediaInfo{Size: 1500}, Location: &tg.InputDocumentFileLocation{ID: 1}, DC: homeDC}
+
+	if err := s.DownloadFile(context.Background(), f, &memSink{}, noRefetch); err != nil {
+		t.Fatalf("download while the home pool fails: %v", err)
+	}
+	if primary.calls() == 0 {
+		t.Error("fallback did not use the primary connection")
+	}
+	pools.mu.Lock()
+	pools.poolErr = nil
+	pools.mu.Unlock()
+	if err := s.DownloadFile(context.Background(), f, &memSink{}, noRefetch); err != nil {
+		t.Fatal(err)
+	}
+	if homePool.calls() == 0 || len(pools.homeMax) != 2 {
+		t.Errorf("home pool calls %d, Pool calls %d: the failure was cached", homePool.calls(), len(pools.homeMax))
 	}
 }
 

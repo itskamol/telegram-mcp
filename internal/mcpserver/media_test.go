@@ -114,6 +114,10 @@ func (p onePool) DC(_ context.Context, dc int, _ int64) (telegram.CloseInvoker, 
 	return p.dc, nil
 }
 
+func (onePool) Pool(int64) (telegram.CloseInvoker, error) {
+	return nil, fmt.Errorf("onePool: no home pool")
+}
+
 func (onePool) Config() tg.Config { return tg.Config{ThisDC: testHomeDC} }
 
 func mediaServer(t *testing.T, home, far *fakeTelegram) (*Server, string) {

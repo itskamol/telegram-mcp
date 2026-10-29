@@ -52,6 +52,10 @@ func (p *gatedPools) DC(ctx context.Context, dc int, _ int64) (telegram.CloseInv
 	return r.pool, r.err
 }
 
+func (p *gatedPools) Pool(int64) (telegram.CloseInvoker, error) {
+	return nil, errors.New("gatedPools: no home pool")
+}
+
 func (p *gatedPools) Config() tg.Config { return tg.Config{ThisDC: homeDC} }
 
 func (p *gatedPools) callCount() int {
