@@ -43,11 +43,17 @@ The tool's inputs and outputs do not change.
 `Service` gets one new dependency, kept as a small interface so tests can fake it:
 
 ```go
-// Pools opens connections to a given DC; *telegram.Client satisfies it.
+// Pools opens connections to other DCs and reports the home DC;
+// *telegram.Client satisfies it.
 type Pools interface {
 	DC(ctx context.Context, dc int, max int64) (telegram.CloseInvoker, error)
+	Config() tg.Config
 }
 ```
+
+The home DC is read per download from `Config().ThisDC`, not stored once:
+a `*_MIGRATE` on the primary connection can move the account to another
+DC while the server runs.
 
 `Service` keeps a cache of opened DC pools (`map[int]*dcEntry` behind a
 mutex), closed by `Service.Close`. `c.DC` exports and imports the
