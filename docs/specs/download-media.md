@@ -49,23 +49,58 @@ type Pools interface {
 }
 ```
 
-`Service` keeps a `map[int]tg.Invoker` of opened DC pools behind a mutex,
-created on first use and closed when `c.Run` returns (one `Service.Close`,
-called from `runServe`). `c.DC` exports and imports the authorization on first
-use (`auth.exportAuthorization` / `auth.importAuthorization`), so caching the
-pool avoids that handshake on every download.
+`Service` keeps a cache of opened DC pools (`map[int]*dcEntry` behind a
+mutex), closed by `Service.Close`. `c.DC` exports and imports the
+authorization on first use (`auth.exportAuthorization` /
+`auth.importAuthorization`), so caching the pool avoids that handshake on
+every download.
 
 Routing:
 
 | File DC | Invoker | Why |
 | --- | --- | --- |
-| home DC | `s.API` (the existing connection) | MTProto pipelines many in-flight requests on one connection, so threads still overlap. No extra connection on the primary auth key, which keeps us clear of anything that could look like `AUTH_KEY_DUPLICATED`. |
-| other DC | cached `Pools.DC(ctx, dc, 4)`, max 4 connections | Requests go straight to the DC that has the file: no `FILE_MIGRATE`, one round trip per part. The pool uses the DC's exported key, not the primary one. |
+| home DC | `s.API` (the existing connection) | MTProto pipelines many in-flight requests on one connection, so threads still overlap. No extra connection on the primary auth key, which keeps us clear of anything that could look like `AUTH_KEY_DUPLICATED`. **This is a hypothesis:** one TCP connection still has one congestion window and possibly a server-side per-connection limit, so 8 threads may not give 8× here. The benchmark measures exactly this path, and the commit message says it is a hypothesis. |
+| other DC | cached `Pools.DC(ctx, dc, downloadThreads)` | Requests go straight to the DC that has the file: no `FILE_MIGRATE`, one round trip per part. The pool uses the DC's exported key, not the primary one. |
 | `DC == 0` (unknown) | `s.API` | Same as today; gotd's migrate handling still works. |
+
+**Pool size = thread count.** A gotd `pool.DC` connection carries one request
+at a time: `acquire` takes it off the free list and `release` returns it only
+after the response (`pool/pool.go`, `DC.Invoke`). With 4 connections and 8
+threads, 4 threads would just wait. So the pool's max is `downloadThreads`.
 
 If measurement (below) shows the home DC is the bottleneck, `c.Pool(n)` for the
 home DC is a later, separate change, tried live in Saved Messages first,
 because those connections share the primary auth key.
+
+#### Pool lifecycle (checked in gotd v0.163.0 source)
+
+- **Who owns it.** The pool's lifetime belongs to the `telegram.Client`:
+  `createPool` builds `pool.NewDC(c.ctx, …)` on the client's own run context,
+  not on the `ctx` passed to `c.DC`. That `ctx` bounds only the first
+  auth transfer (`c.transfer`). `Service` owns the *cache* and closes every
+  pool in `Service.Close`, which `runServe` calls inside the `c.Run`
+  callback, before the client stops.
+- **Which ctx opens it.** Not the tool call's. The pool is opened on a
+  context derived from the server context (`Service.ctx`, set in
+  `NewService`) with a 30 s timeout. The caller waits for the result with
+  its own ctx (`select` on a done channel and `ctx.Done()`), so a cancelled
+  first call stops only its own wait and cannot fail or poison the opening
+  for anyone else.
+- **One opening per DC.** The cache entry is created under the mutex with a
+  `done` channel before the mutex is released; concurrent first requests
+  for the same DC wait on that channel. (Plain mutex + channel; no new
+  dependency for `singleflight`.)
+- **Errors are not cached.** If `c.DC` fails (e.g. `exportAuthorization`
+  error, timeout), gotd closes the half-made pool itself; the entry is
+  removed from the map, every waiter gets the error, and the next download
+  tries again.
+- **Dead connections.** gotd replaces them: `acquire` checks `Dead()` on a
+  free connection and creates a new one, and `DC.Invoke` retries a request
+  whose connection died before the server processed it
+  (`errRetryableOnNewConn`). The pool as a whole only stops when the client's
+  context ends or we call `Close`, i.e. at shutdown. So no replacement
+  logic; as a guard, an invoke error from a closed pool ("DC is closed")
+  drops the cache entry so a later download reopens it.
 
 This all runs in the **primary** process only. Relays (`internal/hub`) never
 open Telegram connections, so the one-process-per-profile rule holds.
@@ -74,8 +109,12 @@ open Telegram connections, so the one-process-per-profile rule holds.
 
 ```go
 downloader.NewDownloader().WithPartSize(1 << 20).
-	Download(inv, loc).WithThreads(downloadThreads).Parallel(ctx, w)
+	Download(tg.NewClient(inv), loc).WithThreads(downloadThreads).Parallel(ctx, w)
 ```
+
+`Download` takes a `downloader.Client` (an interface of `UploadGetFile`,
+`UploadGetFileHashes`, … methods), which `*tg.Client` satisfies and a bare
+`tg.Invoker` does not; hence `tg.NewClient(inv)` around the pool.
 
 - **Part size 1 MB.** That is the maximum `upload.getFile` allows (limit
   must divide 1 MB and a part must not cross a 1 MB boundary; 1 MB parts at
@@ -87,7 +126,8 @@ downloader.NewDownloader().WithPartSize(1 << 20).
     = at most ~16 MB per download.
   - Official clients keep a similar number of requests per file in flight;
     16+ buys little and raises the chance of `FLOOD_WAIT`.
-  - 8 threads over 4 pool connections = 2 in flight per connection.
+  - On another DC that means 8 pool connections (one request each, see
+    1.1); on the home DC, 8 requests pipelined on the one connection.
   - The measurement plan sweeps 4 / 8 / 16 and the constant is changed if 4
     or 16 is clearly better. It stays a constant, not a config option.
 
@@ -97,11 +137,15 @@ downloader.NewDownloader().WithPartSize(1 << 20).
 Add a sibling and keep `WriteNew` for other callers:
 
 ```go
-// WriteNewAt is WriteNew for writers that fill the file out of order.
-// size is the expected length (0 = unknown); a size above limit fails
-// before anything is created.
-func WriteNewAt(dir, name string, size, limit int64, write func(io.WriterAt) error) (string, error)
+// WriteNewAt is WriteNew for writers that fill the file out of order, in
+// parts of partSize bytes. size is the exact expected length and must be
+// > 0; a size above limit fails before anything is created. The file is
+// kept only if every part was written exactly once.
+func WriteNewAt(dir, name string, size, limit, partSize int64, write func(io.WriterAt) error) (string, error)
 ```
+
+Media with an unknown size (`f.Info.Size == 0`, rare) keeps the sequential
+`Stream` into `WriteNew`, so `WriteNewAt` never has to guess the length.
 
 Every guarantee of `WriteNew` is kept:
 
@@ -111,9 +155,10 @@ Every guarantee of `WriteNew` is kept:
 | Never overwrite | Unchanged: data goes to `os.CreateTemp(dir, ".telegram-mcp-*.part")`, then `os.Link` to the first free `name`, `name (1)`, …; `Link` fails on an existing file. The temp file is removed in every case. Shared code with `WriteNew` moves into one helper. |
 | Size checked **before** | `size > limit` → `ErrTooLarge` before the temp file exists (the handler also checks `f.Info.Size` as today). |
 | Size checked **during** | `limitWriterAt.WriteAt(p, off)` refuses `off < 0` or `off+len(p) > limit` with `ErrTooLarge`. Out-of-order writes mean a running total is wrong, so the check is on the end offset, which bounds the file size no matter the order. |
-| Size checked **after** | When `size > 0`, the temp file's final length must equal `size`, else an error and nothing is kept. This catches a short download that `Parallel` thinks is complete. |
+| **Complete**, not just the right length | A file of the right length can still have a hole: if a middle part is never written and the last one is, the `.part` is a sparse file with a run of zero bytes and the correct size. So the length alone proves nothing. The writer tracks coverage: every `WriteAt` must start at a multiple of `partSize`, be `partSize` long (only the last part, ending exactly at `size`, may be shorter), and hit a part not yet written (one bit per part; 200 MB = 200 bits). A misaligned, wrong-length or repeated write is an error. After `write` returns, every part's bit must be set **and** the atomic `written` counter must equal `size`, else an error and nothing is kept. Since writes cannot overlap, these two checks together mean every byte came from Telegram. |
 | `.part` then rename | Unchanged (link + remove, as above). |
-| Concurrency | `*os.File.WriteAt` is safe for concurrent use (`pwrite`); gotd also serialises through `syncio.NewWriterAt`. The wrapper keeps no shared state except an atomic `written` counter (used in commit 2 for progress). |
+| Concurrency | `*os.File.WriteAt` is safe for concurrent use (`pwrite`); gotd also serialises through `syncio.NewWriterAt`. The part bitmap is under a small mutex; `written` is atomic (commit 2 reads it for progress). |
+| Restart (1.5) | `reset()` truncates the temp file to 0, clears the bitmap and sets `written` to 0, under the same mutex, while no write is running. |
 
 ### 1.4 Flood waits
 
@@ -139,7 +184,13 @@ Every sleep is still bounded by the context (tool call or, in commit 2, job).
 File references expire (hours, sometimes sooner). On
 `FILE_REFERENCE_EXPIRED` the download is retried **once** from the start:
 the message is fetched again with `Service.Media` (fresh `FileReference`),
-the same temp file is truncated and refilled. gotd's `Parallel` cannot
+the same temp file is reset (truncated, bitmap and `written` cleared, see
+1.3) and refilled. The message may have been edited meanwhile, so the
+refetched file must be **the same file**: same kind, same `Document.ID` /
+`Photo.ID`, same size. Otherwise the download fails with "the message's file
+changed during the download; call again" and nothing is kept: the new file
+would otherwise be written under the old name and the old size limit. gotd's
+`Parallel` cannot
 resume at an offset, and a mid-download expiry is rare, so a restart is
 simpler than a resumable reader. A second expiry fails with the existing
 hint ("the file reference expired; fetch the message again and retry").
@@ -172,13 +223,26 @@ added, and both paths share the invoker selection and flood wrapper.
   left in `dir`.
 - `size` above `limit` → `ErrTooLarge` before any file is created.
 - Final length ≠ `size` → error, nothing left behind.
+- **Hole:** all parts except one middle part are written (so the length is
+  right and the file is sparse) → error, nothing left behind.
+- Misaligned offset, wrong part length, and the same part written twice →
+  each an error.
+- `reset()` after half the parts, then a full write → correct bytes,
+  `written == size`.
 - Existing `name` → result is `name (1)`; the existing file is untouched.
 - Existing tests for `WriteNew` keep passing (shared helper).
 
 `internal/tele` (fake `tg.Invoker` as in `tele_test.go`, fake `Pools`):
-- A document with `DCID` ≠ home goes to `Pools.DC(…, dc, 4)`, never to
+- A document with `DCID` ≠ home goes to `Pools.DC(…, dc, 8)`, never to
   `s.API`; with `DCID` = home it goes to `s.API`; the pool is opened once for
   two downloads and closed by `Service.Close`.
+- Two concurrent first downloads on one DC → `Pools.DC` called once.
+- `Pools.DC` fails → both waiters get the error; the next download calls it
+  again (error not cached).
+- The first caller's ctx is cancelled while the pool opens → that call
+  returns `context.Canceled`, a second waiting caller still gets the pool.
+- `FILE_REFERENCE_EXPIRED`, refetch returns a different `Document.ID` (or
+  size) → "file changed" error, no file left.
 - Requests use `limit = 1 MB` and offsets that are multiples of 1 MB.
 - `FLOOD_WAIT_3` is retried; `FLOOD_WAIT_120` fails fast with a rate-limit
   message (no sleep: test runs with a short context).
@@ -229,7 +293,11 @@ half-written file under the real name, which `.part` exists to avoid.)
 
 ### 2.2 Job key and registry
 
-A `downloads` registry lives on `mcpserver.Server` (primary process only).
+One `downloads` registry per primary process. It is created once in
+`runServe` and passed to **both** `mcpserver.New` calls: the full server and
+the read-only one share one `svc`, and `download_media` exists in both, so a
+registry per `mcpserver.Server` would let a read-only session and a full
+session start two copies of the same file.
 
 - **Key:** `(chat_id marked, message_id)`. `dir` and `file_name` are not part
   of the key: a second call that asks for another dir or name while the job
@@ -243,6 +311,10 @@ A `downloads` registry lives on `mcpserver.Server` (primary process only).
   repeat call gets the result; after that, or beyond 32 finished entries
   (oldest first), they are forgotten and a new call downloads again (into
   `name (1)`, as today).
+- Before a `done` entry is returned, its `path` is checked with `os.Stat`:
+  if the user deleted or moved the file, or its size is no longer `size`, the
+  entry is forgotten and this call starts a fresh download. A path that no
+  longer exists is never reported as done.
 - **Concurrency:** at most **2 running jobs** (each 8 threads). A third
   distinct download is refused: "2 downloads are already running; try again
   when one finishes" — honest and simple, no hidden queue.
@@ -254,10 +326,30 @@ A `downloads` registry lives on `mcpserver.Server` (primary process only).
 - **Client cancels the tool call** (MCP `notifications/cancelled`, or the 55 s
   timeout): only the *wait* ends. The job runs on the server's context, not
   the call's, and continues; the next call sees it.
-- **Server stops cleanly** (stdin closed, SIGINT/SIGTERM): `runServe`'s
-  context is cancelled, every job is cancelled, its `.part` is removed by
-  `WriteNewAt`'s cleanup, and an audit line with
-  `error: "canceled: server stopped"` is written for each.
+- **Server stops cleanly** (stdin closed, SIGINT/SIGTERM): every job is
+  cancelled, its `.part` is removed by `WriteNewAt`'s cleanup, and an audit
+  line with `error: "canceled: server stopped"` is written for each. The
+  order matters, because each step needs what the next one closes:
+
+  1. Stop accepting new jobs; cancel the jobs' context.
+  2. Wait for every job goroutine (`sync.WaitGroup`). Each one, on its
+     way out, removes its `.part`, deletes its `partial_downloads` row
+     (needs the DB) and writes its audit line (needs the audit file).
+  3. `Service.Close`: close the DC pools.
+  4. The `c.Run` callback returns; the Telegram client stops.
+  5. The deferred `auditLog.Close()`, then `e.close()` (the DB) run, in
+     that order (Go defers are LIFO; both are already deferred that way in
+     `runServe`).
+
+  Steps 1–3 run inside the `c.Run` callback, in the existing deferred
+  function, after `cancel()` and `wg.Wait()` have stopped the listeners and
+  relayed sessions: `downloads.Shutdown()` then `svc.Close()`. The jobs'
+  context is derived from the client's context, not from the listeners'
+  `ctx`, so `cancel()` alone does not stop them; `Shutdown` does. Done the other way
+  round, the `canceled` line goes to a closed file and is lost silently, and
+  the row stays in a closed DB, so the next start sweeps a `.part` that is
+  already gone. Step 2 has a 10 s limit: a job stuck past it is logged to
+  stderr and abandoned; its row stays, so the next start's sweep handles it.
 - **Server killed** (`kill -9`, crash, power loss): the deferred cleanup
   never runs. To not leave `.part` files behind, each job records its temp
   path in a new `partial_downloads(path TEXT PRIMARY KEY, started INTEGER)`
@@ -275,7 +367,8 @@ Relays only pipe stdio to the primary's socket; every MCP session runs inside
 the primary, so the registry and the downloads live there.
 
 - Two sessions (e.g. Claude Desktop chat and a Code session) asking for the
-  same message share one job.
+  same message share one job, including when one is a `--read-only` relay
+  and the other is not (one registry for both servers, see 2.2).
 - A relay process exiting does not affect the job.
 - If the primary exits, its relays lose their connection anyway; jobs end as
   in "Server stops cleanly".
@@ -311,6 +404,13 @@ is a field so tests use ~50 ms):
 - Cancelling the call's context leaves the job running.
 - Cancelling the server context cancels the job, removes the `.part`, writes
   the `canceled` audit line.
+- **Shutdown order:** with a running job, `Shutdown` then `Close`; the test
+  wraps the audit log and the `partial_downloads` store in fakes that fail
+  after close, and checks that the `canceled` line was written and the row
+  deleted *before* either was closed, and that `Shutdown` returned only after
+  the job goroutine exited.
+- A `done` entry whose file was deleted → the next call starts a new
+  download instead of returning the missing path.
 - A third concurrent job is refused; finished entries expire after the TTL
   (injected clock).
 - Stall watchdog fires with a short injected timeout.
@@ -321,7 +421,8 @@ Startup sweep: removes a listed `.telegram-mcp-x.part` inside a root; keeps a
 listed path outside the roots and a listed path with another name.
 
 `internal/hub`: two relayed clients request the same message → one download
-(extend the existing `hub_test.go` setup).
+(extend the existing `hub_test.go` setup); and one full plus one read-only
+server built with the same registry → one download.
 
 ---
 
@@ -352,26 +453,38 @@ Commit 2, replace the `download_media` bullet and the timeout bullet:
 All Telegram actions happen in `me`. Nothing is sent anywhere else.
 
 Setup (needs the user's OK, because it edits their `config.toml`):
-1. Temporarily set `max_upload_mb = 200` and `max_download_mb = 200`.
+1. Save a copy of `config.toml` (in the scratch dir, not the repo), then
+   temporarily set `max_upload_mb = 200` and `max_download_mb = 200`.
 2. In the first `allowed_roots` dir, create `bench-150mb.bin` (150 MB) and
    `bench-30mb.bin` (30 MB) from `/dev/urandom` (random data, so nothing
    compresses and nothing private is uploaded).
 3. `send_file` each to `me` with `as_document: true`; write down both
    message ids. These are the only messages the test creates.
 
-Runs (each through the MCP tool of the running server, timed by the tool
-call's duration; one `serve` primary at a time, restarting it between
-builds):
+Timing comes from the **server's own log**, not the MCP call duration (that
+includes client overhead). Commit 1 adds one stderr line per download at
+the end: `download done dc=… threads=… bytes=… elapsed=…` (no path, no
+chat content, nothing secret). `main` has no such line, so for the baseline
+the same line is added in a local, uncommitted build.
+
+Runs, one `serve` primary at a time, restarting it between builds:
 
 | Build | 30 MB | 150 MB |
 | --- | --- | --- |
-| `main` (baseline) | time | expected timeout at 55 s |
+| `main` (baseline) | time | expected timeout at 55 s (bytes written so far from the log) |
 | commit 1, threads 4 / 8 / 16 | time | time, or bytes at 55 s |
 | commit 2 | — | time to `done` over repeated calls; progress values |
 
+Method, so the order of runs does not favour the new build:
+- The second download of a file may be served "warm" from the DC's cache,
+  so builds are **alternated** (A B A B …, A = `main`, B = commit 1), not
+  run as all A then all B.
+- At least **3 runs per build and file**; the **median** is reported, with
+  min and max.
+- Each run downloads into a fresh subdir so `name (1)` does not mix runs.
+
 Thread variants are temporary local builds; only the chosen constant is
-committed. Each run downloads into a fresh subdir so `name (1)` does not
-mix runs.
+committed.
 
 Saved-Messages uploads are stored on the **home DC**, so these runs measure
 the parallel gain, not the `FILE_MIGRATE` fix. The DC routing is covered by
@@ -383,9 +496,12 @@ Cleanup:
 1. `delete_messages` in `me` with exactly the recorded test message ids
    (and the optional forwarded one) — nothing else.
 2. Remove the local `bench-*.bin` files and downloaded copies.
-3. Restore `max_upload_mb` / `max_download_mb`.
+3. Restore `max_upload_mb` / `max_download_mb`, then **verify**: diff
+   `config.toml` against the copy saved before step 1 of setup (they must be
+   identical), and `list_messages` in `me` shows none of the test ids.
 
-Results (MB/s per build and file) go into the commit 1 message.
+Results (median MB/s per build and file, with min/max) go into the commit 1
+message, together with the home-DC hypothesis and whether it held.
 
 ## Not doing
 
@@ -394,12 +510,19 @@ Results (MB/s per build and file) go into the commit 1 message.
 - No CDN (`WithAllowCDN`) — separate change if measurement shows redirects.
 - No home-DC connection pool unless measurement shows it is needed.
 
-## Open questions for review
+## Review decisions
 
-1. Thread count 8, pool 4 connections — OK to start there?
-2. 2 concurrent jobs, 1 h cap, 2 min stall, 30 min result TTL — OK?
-3. A third download refused rather than queued — OK?
-4. `partial_downloads` table for crash cleanup — OK, or is a startup-only
-   sweep of the root dirs (no subdirs) enough?
+1. 8 threads to start; the pool size follows the thread count (8, see 1.1).
+   Measurement decides the final number.
+2. 2 concurrent jobs, 1 h cap, 2 min stall, 30 min result TTL: kept.
+3. A third download is refused, not queued: a hidden queue would make
+   `status: "downloading"` untrue.
+4. `partial_downloads` table kept: `dir` allows subdirs, so a sweep of the
+   root dirs alone would miss `.part` files, and a recursive sweep of a large
+   root (e.g. `~`) is expensive.
+
+## Open question
+
 5. May the measurement temporarily raise `max_upload_mb`/`max_download_mb`
-   to 200 in `config.toml`?
+   to 200 in `config.toml`? (The user's call; cleanup verifies the original
+   is restored either way.)
