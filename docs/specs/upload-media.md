@@ -1,6 +1,6 @@
 # Spec: fast `send_file` that can outlive one tool call
 
-Status: draft, waiting for review. Nothing here is implemented yet.
+Status: approved. Nothing here is implemented yet.
 
 Companion of `docs/specs/download-media.md`, which did the same for
 downloads; this reuses what it built (DC pools, the job registry, the
@@ -186,10 +186,12 @@ Mutation checks as for downloads.
 - No change to `max_upload_mb`'s default.
 - No upload to other DCs: files are always uploaded to the home DC.
 
-## Open questions for review
+## Review decisions
 
-1. Same-call de-duplication without a key (commit 2, "Change"): OK, or keep
-   today's "two calls, two messages" and dedupe only with a key? Without a
-   key, an agent that polls an `uploading` job could then send twice.
-2. Separate limits (2 uploads + 2 downloads) or one shared limit of 2?
-3. Measure first (commit 1), as written, or go straight to B+C?
+1. Identical calls without a key are one job for 30 minutes (commit 2,
+   "Change"); a new `idempotency_key` sends the same file again on purpose.
+2. Separate limits: 2 uploads and 2 downloads at once.
+3. Measure first (commit 1). Mode A cannot finish even 30 MB inside one
+   call, so runs are compared by bytes per second, which the server logs
+   whether the upload finishes or is cut at the call's timeout; a cut
+   upload never reaches `messages.sendMedia`, so nothing is sent.
