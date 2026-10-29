@@ -32,20 +32,33 @@ const (
 
 var (
 	errTooManyDownloads = errors.New("2 downloads are already running; try again when one finishes")
+	errTooManyUploads   = errors.New("2 uploads are already running; try again when one finishes")
 	errStopping         = errors.New("the server is stopping")
 	errServerStopped    = errors.New("canceled: server stopped")
 	errStalled          = errors.New("download stalled")
 	errTooLong          = errors.New("download took too long")
 )
 
-// jobKey identifies a download: one job per message, whatever dir or name.
+// jobKey identifies a job: a download by chat and message, whatever dir
+// or name; an upload by chat and ref (its idempotency key, given or
+// derived).
 type jobKey struct {
 	chat int64
 	msg  int
+	ref  string
 }
+
+// jobKind separates downloads from uploads: each has its own limit.
+type jobKind int
+
+const (
+	kindDownload jobKind = iota
+	kindUpload
+)
 
 // jobInfo is what a status answer reports before the job is done.
 type jobInfo struct {
+	kind    jobKind
 	planned string // dir/name; the final path may get " (1)"
 	size    int64
 	mime    string
@@ -60,7 +73,9 @@ type job struct {
 
 	started time.Time
 
-	// Set before done closes; read only after.
+	// Set before done closes; read only after. value is what an upload
+	// job's body leaves for the answer (its sentOut).
+	value    any
 	path     string
 	err      error
 	finished time.Time
@@ -107,7 +122,7 @@ type Downloads struct {
 
 	mu      sync.Mutex
 	jobs    map[jobKey]*job
-	running int
+	running map[jobKind]int
 	closed  bool
 	wg      sync.WaitGroup
 }
@@ -118,36 +133,50 @@ func NewDownloads(ctx context.Context) *Downloads {
 	ctx, cancel := context.WithCancelCause(ctx)
 	return &Downloads{ctx: ctx, cancel: cancel, wait: downloadWait, ttl: downloadResultTTL,
 		stall: downloadStall, maxDuration: downloadMaxDuration, shutdownWait: shutdownWait,
-		now: time.Now, jobs: map[jobKey]*job{}}
+		now: time.Now, jobs: map[jobKey]*job{}, running: map[jobKind]int{}}
 }
 
-// start returns the job for key, starting run in the background if there
-// is none to reuse. A finished job is reused only while its result is
-// fresh and, if it succeeded, its file is still there with its size.
+// start is startOrFind for callers that do not need to know whether run
+// was started.
 func (d *Downloads) start(key jobKey, info jobInfo, run func(context.Context, *job) (string, error)) (*job, error) {
+	j, _, err := d.startOrFind(key, info, run)
+	return j, err
+}
+
+// startOrFind returns the job for key, starting run in the background if
+// there is none to reuse; created says whether run was started, so a
+// caller can hand the job what run needs (an open file) or release it. A
+// finished job is reused only while its result is fresh and, for a
+// download that succeeded, while its file is still there with its size.
+// Downloads and uploads each run at most maxRunningDownloads at once.
+func (d *Downloads) startOrFind(key jobKey, info jobInfo, run func(context.Context, *job) (string, error)) (*job, bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
-		return nil, errStopping
+		return nil, false, errStopping
 	}
 	if j, ok := d.jobs[key]; ok {
 		select {
 		case <-j.done:
-			if d.now().Sub(j.finished) <= d.ttl && (j.err != nil || fileIs(j.path, j.info.size)) {
-				return j, nil
+			if d.now().Sub(j.finished) <= d.ttl &&
+				(j.err != nil || j.info.kind == kindUpload || fileIs(j.path, j.info.size)) {
+				return j, false, nil
 			}
 			delete(d.jobs, key)
 		default:
-			return j, nil // still running
+			return j, false, nil // still running
 		}
 	}
-	if d.running >= maxRunningDownloads {
-		return nil, errTooManyDownloads
+	if d.running[info.kind] >= maxRunningDownloads {
+		if info.kind == kindUpload {
+			return nil, false, errTooManyUploads
+		}
+		return nil, false, errTooManyDownloads
 	}
 
 	j := &job{key: key, info: info, done: make(chan struct{}), started: d.now()}
 	d.jobs[key] = j
-	d.running++
+	d.running[info.kind]++
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
@@ -163,11 +192,11 @@ func (d *Downloads) start(key jobKey, info jobInfo, run func(context.Context, *j
 		}
 		d.mu.Lock()
 		j.path, j.err, j.finished = path, err, d.now()
-		d.running--
+		d.running[info.kind]--
 		d.mu.Unlock()
 		close(j.done)
 	}()
-	return j, nil
+	return j, true, nil
 }
 
 // watch cancels j's context if j writes nothing for the stall time.
@@ -223,10 +252,10 @@ func (d *Downloads) Shutdown() {
 	case <-done:
 	case <-time.After(d.shutdownWait):
 		d.mu.Lock()
-		running := d.running
+		downloads, uploads := d.running[kindDownload], d.running[kindUpload]
 		d.mu.Unlock()
 		if d.Log != nil {
-			d.Log.Warn("downloads abandoned at shutdown", "running", running, "waited", d.shutdownWait)
+			d.Log.Warn("jobs abandoned at shutdown", "downloads", downloads, "uploads", uploads, "waited", d.shutdownWait)
 		}
 	}
 }

@@ -166,7 +166,12 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, 
 			"parse_mode: "+parseModeDesc+". Pass idempotency_key so a retry after a timeout cannot send twice.", s.sendMessage)
 	add(srv, "send_file", "Send File", writeAdd,
 		"Send a local file as a photo or document, with an optional caption. Only files inside "+roots+
-			" can be sent (a relative path is inside the first); hidden files are refused.", s.sendFile)
+			" can be sent (a relative path is inside the first); hidden files are refused. "+
+			"A large file may answer status=uploading with the bytes so far and eta_seconds: it goes on in the "+
+			"server, so call again with the same arguments for progress or, once status=sent, the message id. "+
+			"The same call again, or the same idempotency_key, is the same upload and never sends twice, also "+
+			"for 30 minutes after it was sent; to send the same file again on purpose, pass a new "+
+			"idempotency_key.", s.sendFile)
 	add(srv, "forward_messages", "Forward Messages", writeAdd,
 		"Forward messages (ids from list_messages of from_chat) to another chat, or into one of its forum topics with topic_id.", s.forwardMessages)
 	add(srv, "edit_message", "Edit Message", writeChange,
@@ -483,8 +488,17 @@ func (s *Server) listTopics(ctx context.Context, _ *mcp.CallToolRequest, in list
 // --- write tools ---
 
 type sentOut struct {
-	ChatID    int64 `json:"chat_id"`
-	MessageID int   `json:"message_id,omitempty"`
+	// Status is set by send_file only: "sent", or "uploading" while the
+	// upload goes on in the server.
+	Status    string `json:"status,omitempty"`
+	ChatID    int64  `json:"chat_id"`
+	MessageID int    `json:"message_id,omitempty"`
+	// While uploading: bytes sent so far, the file's size, seconds left at
+	// the speed so far (0 = not known yet), and what to do next.
+	Uploaded   int64  `json:"uploaded,omitempty"`
+	Size       int64  `json:"size,omitempty"`
+	EtaSeconds int64  `json:"eta_seconds,omitempty"`
+	Next       string `json:"next,omitempty"`
 	// AlreadySent is set when Telegram refused a repeated idempotency_key
 	// with an error instead of returning the original message; nothing
 	// was sent this time.

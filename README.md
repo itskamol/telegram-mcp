@@ -338,7 +338,12 @@ max_upload_mb = 50                       # per send_file file
 - `send_file` is the risky direction (local files leave the machine), so it
   only reads regular files inside `allowed_roots`, refuses hidden paths such
   as `.env` or `.ssh/` (also through symlinks), and checks that the file it
-  opened is the one it validated.
+  opened is the one it validated. A send that takes longer than about 45 s
+  goes on in the server (at most 2 at a time, apart from downloads), and
+  sends the file the first call checked and opened, never a file put at that
+  path later; the same call again returns progress or the message. The same
+  call, or the same `idempotency_key`, never sends twice, also within 30
+  minutes after it was sent. One audit line per send, when it ends.
 - `view_photo` shows the model a copy scaled to at most 1280 px (5 MB cap).
 - On macOS, `~/Downloads` (the default root), `~/Documents` and `~/Desktop`
   need Files and Folders permission for the app that runs `telegram-mcp`.

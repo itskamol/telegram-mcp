@@ -3,6 +3,8 @@ package mcpserver
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -234,12 +237,19 @@ type sendFileIn struct {
 func (in sendFileIn) idempotencyKey() string { return in.IdempotencyKey }
 
 func (s *Server) sendFile(ctx context.Context, _ *mcp.CallToolRequest, in sendFileIn) (*mcp.CallToolResult, sentOut, error) {
-	// The file check comes first: it is the guard against exfiltration.
+	// The file check comes first: it is the guard against exfiltration. It
+	// runs on every call, so a path that is no longer allowed is refused
+	// before any job is looked up. The job sends the file opened here.
 	f, fi, err := fsguard.OpenFile(s.policy.AllowedRoots, in.Path)
 	if err != nil {
 		return nil, sentOut{}, err
 	}
-	defer f.Close()
+	handedOver := false
+	defer func() {
+		if !handedOver {
+			f.Close()
+		}
+	}()
 	if fi.Size() == 0 {
 		return nil, sentOut{}, errors.New("file is empty")
 	}
@@ -264,10 +274,65 @@ func (s *Server) sendFile(ctx context.Context, _ *mcp.CallToolRequest, in sendFi
 		AsPhoto: !in.AsDocument && fi.Size() <= maxPhotoSize &&
 			(mimeType == "image/jpeg" || mimeType == "image/png" || mimeType == "image/webp"),
 	}
-	key := scopedKey("send_file", r.Marked, in.IdempotencyKey)
-	id, err := s.svc.SendFile(ctx, r, up, caption, in.ReplyTo, in.TopicID, tele.RandomID(key, 0))
-	return s.sent("send_file", r.Marked, id, in.ReplyTo, f.Name(), err)
+	up.Uploaded = &atomic.Int64{}
+
+	key := jobKey{chat: r.Marked, ref: uploadRef(in, f.Name(), fi)}
+	info := jobInfo{kind: kindUpload, planned: f.Name(), size: fi.Size(), mime: mimeType}
+	j, created, err := s.downloads.startOrFind(key, info, func(ctx context.Context, j *job) (string, error) {
+		defer f.Close()
+		j.setProgress(byteCount{up.Uploaded})
+		id, err := s.svc.SendFile(ctx, r, up, caption, in.ReplyTo, in.TopicID,
+			tele.RandomID(scopedKey("send_file", r.Marked, in.IdempotencyKey), 0))
+		if err != nil && ctx.Err() != nil {
+			err = context.Cause(ctx) // server stopped, stalled or too long
+		}
+		// The job writes the audit line, once, whoever is still waiting.
+		_, out, err := s.sent("send_file", r.Marked, id, in.ReplyTo, f.Name(), err)
+		j.value = out
+		return "", err
+	})
+	if err != nil {
+		return nil, sentOut{}, err
+	}
+	handedOver = created
+	if err := s.downloads.waitFor(ctx, j); err != nil {
+		return nil, sentOut{}, err
+	}
+	select {
+	case <-j.done:
+	default:
+		got := j.downloaded()
+		return nil, sentOut{Status: "uploading", ChatID: r.Marked, Uploaded: got, Size: j.info.size,
+			EtaSeconds: etaSeconds(got, j.info.size, time.Since(j.started)),
+			Next: "Not sent yet. Call send_file again with the same arguments; each call waits up to about 45 s. " +
+				"It is the same upload, so the message is never sent twice.",
+		}, nil
+	}
+	if _, err := j.result(); err != nil {
+		s.downloads.forget(j) // reported now; the next call tries again
+		return nil, sentOut{}, err
+	}
+	out := j.value.(sentOut)
+	out.Status = "sent"
+	return nil, out, nil
 }
+
+// uploadRef identifies a send_file job: its idempotency_key or, without
+// one, everything that makes the message, so a repeated call while it
+// uploads, or soon after, is the same job and never sends twice.
+func uploadRef(in sendFileIn, real string, fi os.FileInfo) string {
+	if in.IdempotencyKey != "" {
+		return "key\x00" + in.IdempotencyKey
+	}
+	sum := sha256.Sum256(fmt.Appendf(nil, "%s\x00%d\x00%d\x00%s\x00%s\x00%v\x00%d\x00%d",
+		real, fi.Size(), fi.ModTime().UnixNano(), in.Caption, in.ParseMode, in.AsDocument, in.ReplyTo, in.TopicID))
+	return "args\x00" + hex.EncodeToString(sum[:])
+}
+
+// byteCount reports a counter as a job's progress.
+type byteCount struct{ n *atomic.Int64 }
+
+func (b byteCount) Written() int64 { return b.n.Load() }
 
 // sniffMIME guesses the type from the extension, then from the content.
 func sniffMIME(f *os.File, name string) string {

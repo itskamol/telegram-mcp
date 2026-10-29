@@ -60,11 +60,11 @@ func TestDownloadsOneJobPerKey(t *testing.T) {
 	d := NewDownloads(context.Background())
 	t.Cleanup(d.Shutdown)
 	g := newGatedRun()
-	j1, err := d.start(jobKey{1, 5}, info, g.run)
+	j1, err := d.start(jobKey{chat: 1, msg: 5}, info, g.run)
 	if err != nil {
 		t.Fatal(err)
 	}
-	j2, err := d.start(jobKey{1, 5}, jobInfo{planned: "/other/name.bin"}, g.run)
+	j2, err := d.start(jobKey{chat: 1, msg: 5}, jobInfo{planned: "/other/name.bin"}, g.run)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,9 +89,9 @@ func TestDownloadsLimit(t *testing.T) {
 	d := NewDownloads(context.Background())
 	t.Cleanup(d.Shutdown)
 	a, b, c := newGatedRun(), newGatedRun(), newGatedRun()
-	ja, _ := d.start(jobKey{1, 1}, info, a.run)
-	d.start(jobKey{1, 2}, info, b.run)
-	if _, err := d.start(jobKey{1, 3}, info, c.run); !errors.Is(err, errTooManyDownloads) {
+	ja, _ := d.start(jobKey{chat: 1, msg: 1}, info, a.run)
+	d.start(jobKey{chat: 1, msg: 2}, info, b.run)
+	if _, err := d.start(jobKey{chat: 1, msg: 3}, info, c.run); !errors.Is(err, errTooManyDownloads) {
 		t.Fatalf("third job: err = %v, want errTooManyDownloads", err)
 	}
 	if c.started.Load() != 0 {
@@ -99,7 +99,7 @@ func TestDownloadsLimit(t *testing.T) {
 	}
 	close(a.release)
 	waitDone(t, ja)
-	if _, err := d.start(jobKey{1, 3}, info, c.run); err != nil {
+	if _, err := d.start(jobKey{chat: 1, msg: 3}, info, c.run); err != nil {
 		t.Fatalf("third job after one finished: %v", err)
 	}
 	close(b.release)
@@ -119,7 +119,7 @@ func TestDownloadsDoneKept(t *testing.T) {
 	d := NewDownloads(context.Background())
 	d.now = func() time.Time { return now }
 	t.Cleanup(d.Shutdown)
-	key := jobKey{1, 5}
+	key := jobKey{chat: 1, msg: 5}
 
 	g := newGatedRun()
 	g.path = file
@@ -165,7 +165,7 @@ func TestDownloadsDoneKept(t *testing.T) {
 func TestDownloadsFailureForgottenAfterReport(t *testing.T) {
 	d := NewDownloads(context.Background())
 	t.Cleanup(d.Shutdown)
-	key := jobKey{1, 5}
+	key := jobKey{chat: 1, msg: 5}
 	g := newGatedRun()
 	g.err = errors.New("boom")
 	close(g.release)
@@ -190,7 +190,7 @@ func TestDownloadsFailureForgottenAfterReport(t *testing.T) {
 func TestDownloadsShutdown(t *testing.T) {
 	d := NewDownloads(context.Background())
 	g := newGatedRun()
-	j, _ := d.start(jobKey{1, 5}, info, g.run)
+	j, _ := d.start(jobKey{chat: 1, msg: 5}, info, g.run)
 	d.Shutdown()
 	select {
 	case <-j.done:
@@ -200,7 +200,7 @@ func TestDownloadsShutdown(t *testing.T) {
 	if err, _ := g.ctxErr.Load().(error); !errors.Is(err, context.Canceled) {
 		t.Errorf("job context error = %v, want canceled", err)
 	}
-	if _, err := d.start(jobKey{1, 6}, info, newGatedRun().run); !errors.Is(err, errStopping) {
+	if _, err := d.start(jobKey{chat: 1, msg: 6}, info, newGatedRun().run); !errors.Is(err, errStopping) {
 		t.Errorf("start after Shutdown: err = %v, want errStopping", err)
 	}
 }
@@ -213,14 +213,14 @@ func TestDownloadsStall(t *testing.T) {
 	t.Cleanup(d.Shutdown)
 
 	stuck := newGatedRun()
-	js, _ := d.start(jobKey{1, 1}, info, stuck.run)
+	js, _ := d.start(jobKey{chat: 1, msg: 1}, info, stuck.run)
 	waitDone(t, js)
 	if _, err := js.result(); !errors.Is(err, errStalled) {
 		t.Errorf("stuck job: err = %v, want errStalled", err)
 	}
 
 	moving := newGatedRun()
-	jm, _ := d.start(jobKey{1, 2}, info, moving.run)
+	jm, _ := d.start(jobKey{chat: 1, msg: 2}, info, moving.run)
 	<-moving.entered
 	for range 10 { // 400 ms of steady progress, well past the stall time
 		moving.written.Add(1)
@@ -242,7 +242,7 @@ func TestDownloadsMaxDuration(t *testing.T) {
 	d.maxDuration = 50 * time.Millisecond
 	t.Cleanup(d.Shutdown)
 	g := newGatedRun()
-	j, _ := d.start(jobKey{1, 1}, info, func(ctx context.Context, j *job) (string, error) {
+	j, _ := d.start(jobKey{chat: 1, msg: 1}, info, func(ctx context.Context, j *job) (string, error) {
 		// Keep progressing, so only the cap can end it.
 		go func() {
 			for ctx.Err() == nil {
@@ -266,7 +266,7 @@ func TestDownloadsShutdownLimit(t *testing.T) {
 	d.shutdownWait = 50 * time.Millisecond
 	d.Log = slog.New(slog.NewTextHandler(&log, nil))
 	release := make(chan struct{})
-	j, _ := d.start(jobKey{1, 1}, info, func(context.Context, *job) (string, error) {
+	j, _ := d.start(jobKey{chat: 1, msg: 1}, info, func(context.Context, *job) (string, error) {
 		<-release // deaf to its context, like a hung os.Link
 		return "", nil
 	})
@@ -282,4 +282,37 @@ func TestDownloadsShutdownLimit(t *testing.T) {
 	}
 	close(release)
 	waitDone(t, j)
+}
+
+// Uploads and downloads have separate limits, and a finished upload is
+// reused within the TTL without any file to check.
+func TestUploadJobs(t *testing.T) {
+	d := NewDownloads(context.Background())
+	t.Cleanup(d.Shutdown)
+	up := jobInfo{kind: kindUpload, size: 10}
+	dl1, dl2 := newGatedRun(), newGatedRun()
+	d.start(jobKey{chat: 1, msg: 1}, info, dl1.run)
+	d.start(jobKey{chat: 1, msg: 2}, info, dl2.run)
+
+	u1, u2, u3 := newGatedRun(), newGatedRun(), newGatedRun()
+	j1, created, err := d.startOrFind(jobKey{chat: 1, ref: "a"}, up, u1.run)
+	if err != nil || !created {
+		t.Fatalf("first upload next to 2 downloads: created=%v err=%v", created, err)
+	}
+	if _, created, err := d.startOrFind(jobKey{chat: 1, ref: "a"}, up, u1.run); err != nil || created {
+		t.Errorf("same upload again: created=%v err=%v, want the running job", created, err)
+	}
+	d.startOrFind(jobKey{chat: 1, ref: "b"}, up, u2.run)
+	if _, _, err := d.startOrFind(jobKey{chat: 1, ref: "c"}, up, u3.run); !errors.Is(err, errTooManyUploads) {
+		t.Errorf("third upload: err = %v, want errTooManyUploads", err)
+	}
+
+	close(u1.release)
+	waitDone(t, j1)
+	if again, created, _ := d.startOrFind(jobKey{chat: 1, ref: "a"}, up, u1.run); again != j1 || created {
+		t.Error("a finished upload was not reused (it has no file to check)")
+	}
+	close(u2.release)
+	close(dl1.release)
+	close(dl2.release)
 }

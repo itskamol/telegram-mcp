@@ -37,10 +37,14 @@ type fakeTelegram struct {
 	expired []byte
 	gate    chan struct{} // if set, getFile waits until it is closed
 	fail    error         // if set, the next getFile fails with it, once
+	upGate  chan struct{} // if set, upload parts wait until it is closed
+	sendErr error         // if set, the next messages.sendMedia fails with it, once
 
-	mu      sync.Mutex
-	fetches int
-	getFile int
+	mu        sync.Mutex
+	fetches   int
+	getFile   int
+	partBytes int64 // upload bytes received
+	sends     int   // messages.sendMedia that succeeded
 }
 
 func (f *fakeTelegram) Invoke(ctx context.Context, in bin.Encoder, out bin.Decoder) error {
@@ -76,6 +80,36 @@ func (f *fakeTelegram) Invoke(ctx context.Context, in bin.Encoder, out bin.Decod
 		start := min(req.Offset, int64(len(f.data)))
 		end := min(start+int64(req.Limit), int64(len(f.data)))
 		reply = &tg.UploadFile{Type: &tg.StorageFilePartial{}, Bytes: f.data[start:end]}
+	case *tg.UploadSaveFilePartRequest, *tg.UploadSaveBigFilePartRequest:
+		if f.upGate != nil {
+			select {
+			case <-f.upGate:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		n := 0
+		switch r := req.(type) {
+		case *tg.UploadSaveFilePartRequest:
+			n = len(r.Bytes)
+		case *tg.UploadSaveBigFilePartRequest:
+			n = len(r.Bytes)
+		}
+		f.mu.Lock()
+		f.partBytes += int64(n)
+		f.mu.Unlock()
+		reply = &tg.BoolTrue{}
+	case *tg.MessagesSendMediaRequest:
+		f.mu.Lock()
+		if err := f.sendErr; err != nil {
+			f.sendErr = nil
+			f.mu.Unlock()
+			return err
+		}
+		f.sends++
+		id := 100 + f.sends
+		f.mu.Unlock()
+		reply = &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateMessageID{ID: id, RandomID: req.RandomID}}}
 	default:
 		return fmt.Errorf("fakeTelegram: unexpected %T", in)
 	}
@@ -134,7 +168,7 @@ func mediaServer(t *testing.T, home, far *fakeTelegram) (*Server, string) {
 	dl := NewDownloads(context.Background())
 	t.Cleanup(dl.Shutdown)
 	s := &Server{svc: svc, audit: log, downloads: dl,
-		policy: Policy{AllowedRoots: []string{dir}, MaxDownload: 10 << 20}}
+		policy: Policy{AllowedRoots: []string{dir}, MaxDownload: 10 << 20, MaxUpload: 10 << 20}}
 	auditPaths.Store(s, logPath)
 	return s, dir
 }
@@ -492,4 +526,158 @@ func TestDownloadDescriptionMentionsCLI(t *testing.T) {
 		}
 	}
 	t.Fatal("no download_media tool")
+}
+
+func (f *fakeTelegram) uploads() (bytes int64, sends int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.partBytes, f.sends
+}
+
+// uploadServer is a server whose uploads go over the home connection (the
+// test pools have no home pool), with a 3 MB file "up.bin" in its root.
+func uploadServer(t *testing.T) (*Server, *fakeTelegram, string) {
+	t.Helper()
+	home := &fakeTelegram{media: []tg.MessageMediaClass{&tg.MessageMediaEmpty{}}}
+	s, dir := mediaServer(t, home, &fakeTelegram{})
+	s.downloads.wait = 50 * time.Millisecond
+	if err := os.WriteFile(filepath.Join(dir, "up.bin"), fileBytes(3<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return s, home, dir
+}
+
+func sendUp(t *testing.T, s *Server, key string) (sentOut, error) {
+	t.Helper()
+	_, out, err := s.sendFile(context.Background(), nil, sendFileIn{Chat: "me", Path: "up.bin", AsDocument: true, IdempotencyKey: key})
+	return out, err
+}
+
+// pollSent calls send_file until it answers "sent".
+func pollSent(t *testing.T, s *Server, key string) sentOut {
+	t.Helper()
+	for range 200 {
+		out, err := sendUp(t, s, key)
+		if err != nil {
+			t.Fatalf("send_file: %v", err)
+		}
+		if out.Status == "sent" {
+			return out
+		}
+		time.Sleep(10 * time.Millisecond) // polling the tool, as a client would
+	}
+	t.Fatal("send_file never answered sent")
+	return sentOut{}
+}
+
+// An upload that outlasts the wait answers "uploading" and goes on in the
+// server; the same call again, even without an idempotency_key, is the
+// same job and sends nothing twice; once done, it answers "sent". One
+// audit line, at the end.
+func TestSendFileInBackground(t *testing.T) {
+	s, home, _ := uploadServer(t)
+	home.upGate = make(chan struct{})
+
+	first, err := sendUp(t, s, "")
+	if err != nil || first.Status != "uploading" || first.Size != 3<<20 {
+		t.Fatalf("first call = %+v, %v; want uploading with the size", first, err)
+	}
+	if !strings.Contains(first.Next, "send_file") || !strings.Contains(strings.ToLower(first.Next), "same") {
+		t.Errorf("next = %q, want it to say: call send_file again with the same arguments", first.Next)
+	}
+	if again, err := sendUp(t, s, ""); err != nil || again.Status != "uploading" {
+		t.Fatalf("second call = %+v, %v; want still uploading", again, err)
+	}
+	close(home.upGate)
+	done := pollSent(t, s, "")
+	if done.MessageID != 101 {
+		t.Errorf("message id = %d, want 101", done.MessageID)
+	}
+	if _, sends := home.uploads(); sends != 1 {
+		t.Errorf("%d messages sent, want 1", sends)
+	}
+	if n := len(auditLines(t, s, "send_file")); n != 1 {
+		t.Errorf("%d audit lines, want 1", n)
+	}
+}
+
+// After a send, the same call within the result TTL returns that message;
+// after the TTL it sends again. A different idempotency_key is a new send.
+func TestSendFileRepeatAndKeys(t *testing.T) {
+	s, home, _ := uploadServer(t)
+	now := time.Unix(1000, 0)
+	s.downloads.now = func() time.Time { return now }
+
+	a := pollSent(t, s, "")
+	if b := pollSent(t, s, ""); b.MessageID != a.MessageID {
+		t.Errorf("repeat within the TTL sent %d, want the first message %d", b.MessageID, a.MessageID)
+	}
+	if _, sends := home.uploads(); sends != 1 {
+		t.Fatalf("%d sends after a repeat, want 1", sends)
+	}
+	now = now.Add(s.downloads.ttl + time.Second)
+	pollSent(t, s, "")
+	pollSent(t, s, "key-a")
+	pollSent(t, s, "key-b")
+	if _, sends := home.uploads(); sends != 4 {
+		t.Errorf("%d sends, want 4 (first, after the TTL, key-a, key-b)", sends)
+	}
+}
+
+// A failed send is reported once; the next call sends again.
+func TestSendFileRetryAfterFailure(t *testing.T) {
+	s, home, _ := uploadServer(t)
+	home.sendErr = tgerr.New(400, "CHAT_WRITE_FORBIDDEN")
+	if out, err := sendUp(t, s, ""); err == nil {
+		t.Fatalf("first call = %+v, want the error", out)
+	}
+	if out := pollSent(t, s, ""); out.MessageID != 101 {
+		t.Errorf("retry = %+v, want message 101", out)
+	}
+}
+
+// The job sends the file the first call checked and opened: replacing the
+// file at that path afterwards changes nothing. A path that is gone is
+// refused at once, while the job goes on.
+func TestSendFileHoldsTheOpenedFile(t *testing.T) {
+	s, home, dir := uploadServer(t)
+	home.upGate = make(chan struct{})
+	if out, err := sendUp(t, s, "k"); err != nil || out.Status != "uploading" {
+		t.Fatalf("first call = %+v, %v", out, err)
+	}
+	other := filepath.Join(dir, "other.bin")
+	if err := os.WriteFile(other, fileBytes(1<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(other, filepath.Join(dir, "up.bin")); err != nil { // a new file at the path
+		t.Fatal(err)
+	}
+	close(home.upGate)
+	pollSent(t, s, "k")
+	if got, _ := home.uploads(); got != 3<<20 {
+		t.Errorf("uploaded %d bytes, want the 3 MB file the first call opened", got)
+	}
+
+	os.Remove(filepath.Join(dir, "up.bin"))
+	if _, err := sendUp(t, s, "k"); err == nil {
+		t.Error("a call for a path that is gone was not refused")
+	}
+}
+
+// Stopping the server cancels an upload: nothing is sent, one audit line
+// says why.
+func TestSendFileShutdownCancels(t *testing.T) {
+	s, home, _ := uploadServer(t)
+	home.upGate = make(chan struct{})
+	if out, err := sendUp(t, s, ""); err != nil || out.Status != "uploading" {
+		t.Fatalf("first call = %+v, %v", out, err)
+	}
+	s.downloads.Shutdown()
+	if _, sends := home.uploads(); sends != 0 {
+		t.Errorf("%d messages sent after shutdown, want 0", sends)
+	}
+	lines := auditLines(t, s, "send_file")
+	if len(lines) != 1 || !strings.Contains(lines[0], "server stopped") {
+		t.Errorf("audit = %v, want one line saying the server stopped", lines)
+	}
 }
