@@ -49,7 +49,7 @@ func sendSession(t *testing.T, pending int32, fail error, noSend bool, calls *at
 			if fail != nil {
 				return nil, sendOut{}, fail
 			}
-			return nil, sendOut{Status: "sent", ChatID: 1, MessageID: 42}, nil
+			return nil, sendOut{Status: "sent", ChatID: 1, MessageID: 4217}, nil
 		})
 	}
 	st, ct := mcp.NewInMemoryTransports()
@@ -77,8 +77,8 @@ func TestSendUntilSent(t *testing.T) {
 	var progress bytes.Buffer
 
 	id, err := Send(context.Background(), cs, map[string]any{"chat": "me", "path": "/r/f.bin"}, &progress)
-	if err != nil || id != 42 {
-		t.Fatalf("Send = %d, %v; want 42", id, err)
+	if err != nil || id != 4217 {
+		t.Fatalf("Send = %d, %v; want 4217", id, err)
 	}
 	if len(keys) != 3 || keys[0] != "" || keys[1] != "" || keys[2] != "" {
 		t.Errorf("idempotency keys per call = %q, want none added on all 3", keys)
@@ -121,5 +121,26 @@ func TestSendReadOnly(t *testing.T) {
 	cs := sendSession(t, 0, nil, true, &calls, &keys, &mu)
 	if _, err := Send(context.Background(), cs, map[string]any{"chat": "me", "path": "/r/f.bin"}, &bytes.Buffer{}); !errors.Is(err, ErrNoSendFile) {
 		t.Errorf("err = %v, want ErrNoSendFile", err)
+	}
+}
+
+// An answer without a known status is an error, not a sent message.
+func TestSendUnknownStatus(t *testing.T) {
+	srv := mcp.NewServer(&mcp.Implementation{Name: "fake", Version: "0"}, nil)
+	mcp.AddTool(srv, &mcp.Tool{Name: "send_file"}, func(context.Context, *mcp.CallToolRequest, sendIn) (*mcp.CallToolResult, sendOut, error) {
+		return nil, sendOut{ChatID: 1, MessageID: 5}, nil
+	})
+	st, ct := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := srv.Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	if id, err := Send(ctx, cs, map[string]any{"chat": "me", "path": "/r/f.bin"}, &bytes.Buffer{}); err == nil {
+		t.Errorf("Send = %d, nil; want an error for an answer without status", id)
 	}
 }

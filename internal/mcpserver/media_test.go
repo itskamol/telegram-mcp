@@ -587,7 +587,7 @@ func pollSent(t *testing.T, s *Server, key string) sentOut {
 // same job and sends nothing twice; once done, it answers "sent". One
 // audit line, at the end.
 func TestSendFileInBackground(t *testing.T) {
-	s, home, _ := uploadServer(t)
+	s, home, dir := uploadServer(t)
 	home.upGate, home.upFree = make(chan struct{}), 2
 
 	first, err := sendUp(t, s, "")
@@ -597,7 +597,13 @@ func TestSendFileInBackground(t *testing.T) {
 	if first.Uploaded != 2*512<<10 {
 		t.Errorf("uploaded = %d, want the 2 parts that got through (%d)", first.Uploaded, 2*512<<10)
 	}
-	for _, want := range []string{"send_file", "same", "telegram-mcp send --chat me --file ", "up.bin --as-document`"} {
+	real, err := filepath.EvalSymlinks(filepath.Join(dir, "up.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The real path, not the relative one: the CLI would read that from its
+	// own directory.
+	for _, want := range []string{"send_file", "same", "`telegram-mcp send --chat me --file " + shellQuote(real) + " --as-document`"} {
 		if !strings.Contains(first.Next, want) {
 			t.Errorf("next = %q, lacks %q", first.Next, want)
 		}
@@ -717,5 +723,8 @@ func TestSendCommand(t *testing.T) {
 		if got := sendCommand(c.in, c.path); got != c.want {
 			t.Errorf("sendCommand(%+v, %q) =\n %s\nwant\n %s", c.in, c.path, got, c.want)
 		}
+	}
+	if got := shellQuote(""); got != "''" {
+		t.Errorf("shellQuote(\"\") = %s, want ''", got)
 	}
 }
