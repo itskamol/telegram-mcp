@@ -171,7 +171,9 @@ func New(svc *tele.Service, policy Policy, auditLog *audit.Log, version string, 
 			"server, so call again with the same arguments for progress or, once status=sent, the message id. "+
 			"The same call again, or the same idempotency_key, is the same upload and never sends twice, also "+
 			"for 30 minutes after it was sent; to send the same file again on purpose, pass a new "+
-			"idempotency_key.", s.sendFile)
+			"idempotency_key. If you can run shell commands, prefer `telegram-mcp send --chat <chat> --file "+
+			"<path> [--caption c] [--as-document] [--idempotency-key k]` for large files: it waits until the "+
+			"message is sent and prints its id, so you can run it in the background instead of calling again.", s.sendFile)
 	add(srv, "forward_messages", "Forward Messages", writeAdd,
 		"Forward messages (ids from list_messages of from_chat) to another chat, or into one of its forum topics with topic_id.", s.forwardMessages)
 	add(srv, "edit_message", "Edit Message", writeChange,

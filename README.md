@@ -52,6 +52,24 @@ polling the file (which appears only when complete). It opens no
 Telegram connection of its own and uses the read-only socket. Stopping it
 stops the waiting only: the download goes on in the server.
 
+### Sends from a shell
+
+```bash
+telegram-mcp send --chat me --file report.pdf [--caption "…"] [--parse-mode markdown]
+                  [--as-document] [--reply-to N] [--topic-id N] [--idempotency-key K]
+```
+
+Sends a file through the running server, with the same limits and
+allowed directories as `send_file`, and waits until it is sent: progress
+goes to stderr, the message id to stdout, and the exit status is 1 on
+failure. A relative `--file` that exists in the current directory is
+taken from there. It uses the full socket, since sending is a write, so a
+`read_only` server refuses it. It adds no idempotency key of its own: the
+server keys an upload by its arguments, so running the same command again
+(or the command a `send_file` "uploading" answer gives) joins the same
+upload and never sends twice within 30 minutes. Stopping it stops the
+waiting only: the upload goes on in the server.
+
 ### Update
 
 ```bash
@@ -344,6 +362,8 @@ max_upload_mb = 50                       # per send_file file
   path later; the same call again returns progress or the message. The same
   call, or the same `idempotency_key`, never sends twice, also within 30
   minutes after it was sent. One audit line per send, when it ends.
+  `telegram-mcp send` uses the server's full socket and is refused when the
+  server runs `read_only` (it has no `send_file` then).
 - `view_photo` shows the model a copy scaled to at most 1280 px (5 MB cap).
 - On macOS, `~/Downloads` (the default root), `~/Documents` and `~/Desktop`
   need Files and Folders permission for the app that runs `telegram-mcp`.

@@ -13,9 +13,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -304,8 +307,9 @@ func (s *Server) sendFile(ctx context.Context, _ *mcp.CallToolRequest, in sendFi
 		got := j.downloaded()
 		return nil, sentOut{Status: "uploading", ChatID: r.Marked, Uploaded: got, Size: j.info.size,
 			EtaSeconds: etaSeconds(got, j.info.size, time.Since(j.started)),
-			Next: "Not sent yet. Call send_file again with the same arguments; each call waits up to about 45 s. " +
-				"It is the same upload, so the message is never sent twice.",
+			Next: fmt.Sprintf("Not sent yet. Call send_file again with the same arguments; each call waits up "+
+				"to about 45 s. From a shell, `%s` waits until it is sent and prints the message id. Either way "+
+				"it is the same upload, so the message is never sent twice.", sendCommand(in, f.Name())),
 		}, nil
 	}
 	if _, err := j.result(); err != nil {
@@ -327,6 +331,42 @@ func uploadRef(in sendFileIn, real string, fi os.FileInfo) string {
 	sum := sha256.Sum256(fmt.Appendf(nil, "%s\x00%d\x00%d\x00%s\x00%s\x00%v\x00%d\x00%d",
 		real, fi.Size(), fi.ModTime().UnixNano(), in.Caption, in.ParseMode, in.AsDocument, in.ReplyTo, in.TopicID))
 	return "args\x00" + hex.EncodeToString(sum[:])
+}
+
+// sendCommand is the telegram-mcp send command that joins the upload in:
+// every argument uploadRef uses, with the real path, quoted for a POSIX
+// shell.
+func sendCommand(in sendFileIn, real string) string {
+	args := []string{"telegram-mcp", "send", "--chat", shellQuote(string(in.Chat)), "--file", shellQuote(real)}
+	for _, a := range [][2]string{{"--caption", in.Caption}, {"--parse-mode", in.ParseMode}} {
+		if a[1] != "" {
+			args = append(args, a[0], shellQuote(a[1]))
+		}
+	}
+	if in.AsDocument {
+		args = append(args, "--as-document")
+	}
+	if in.ReplyTo != 0 {
+		args = append(args, "--reply-to", strconv.Itoa(in.ReplyTo))
+	}
+	if in.TopicID != 0 {
+		args = append(args, "--topic-id", strconv.Itoa(in.TopicID))
+	}
+	if in.IdempotencyKey != "" {
+		args = append(args, "--idempotency-key", shellQuote(in.IdempotencyKey))
+	}
+	return strings.Join(args, " ")
+}
+
+// shellQuote leaves a plain word as it is and single-quotes anything else.
+func shellQuote(s string) string {
+	plain := s != "" && !strings.ContainsFunc(s, func(r rune) bool {
+		return !(r < utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("@%+=:,./_-", r)))
+	})
+	if plain {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // byteCount reports a counter as a job's progress.

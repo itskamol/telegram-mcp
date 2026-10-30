@@ -64,6 +64,10 @@ Usage:
   telegram-mcp download --chat <chat> --message <id> [--dir d] [--file-name n] [--account name]
                      download a message's attachment through the running server; waits
                      until done, prints the path (exit 1 on failure)
+  telegram-mcp send --chat <chat> --file <path> [--caption c] [--parse-mode m] [--as-document]
+                    [--reply-to id] [--topic-id id] [--idempotency-key k] [--account name]
+                     send a file through the running server; waits until it is sent,
+                     prints the message id (exit 1 on failure)
   telegram-mcp update [--check] [--version v0.9.2]   replace this binary with a release
   telegram-mcp version
 
@@ -107,6 +111,8 @@ func main() {
 		err = runUpdate(ctx, args)
 	case "download":
 		err = runDownload(ctx, args)
+	case "send":
+		err = runSend(ctx, args)
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":
@@ -739,5 +745,77 @@ func runDownload(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Println(path)
+	return nil
+}
+
+// runSend sends a file through the running server, like the send_file
+// tool, and waits until it is sent, printing the message id. It uses the
+// full socket: send_file is a write, absent under read_only, so the
+// command cannot get around it. It adds no idempotency key of its own, so
+// a re-run with the same arguments, or the command send_file's "next"
+// gives, joins the same upload instead of sending again.
+func runSend(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("send", flag.ContinueOnError)
+	account := fs.String("account", config.DefaultAccount, "account label")
+	chat := fs.String("chat", "", "chat id, @username or me (required)")
+	file := fs.String("file", "", "file inside allowed_roots (required); a relative path that exists here is taken from here")
+	caption := fs.String("caption", "", "caption")
+	parseMode := fs.String("parse-mode", "", "plain (default), markdown or html, for the caption")
+	asDocument := fs.Bool("as-document", false, "send images as files instead of compressed photos")
+	replyTo := fs.Int("reply-to", 0, "id of a message in this chat to reply to")
+	topicID := fs.Int("topic-id", 0, "forum topic id")
+	key := fs.String("idempotency-key", "", "a key; the same key never sends twice")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *chat == "" || *file == "" {
+		return errors.New("usage: telegram-mcp send --chat <chat> --file <path> [--caption c] [--as-document] [--idempotency-key k]")
+	}
+	if err := config.ValidateAccount(*account); err != nil {
+		return err
+	}
+	// The server resolves a relative path inside its first allowed root;
+	// someone at a shell means the file next to them, when there is one.
+	path := *file
+	if !filepath.IsAbs(path) {
+		if _, err := os.Stat(path); err == nil {
+			if path, err = filepath.Abs(path); err != nil {
+				return err
+			}
+		}
+	}
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return err
+	}
+	cs, err := hub.Connect(ctx, hub.SocketPath(paths.DataDir, *account, version, false), 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer cs.Close()
+
+	call := map[string]any{"chat": *chat, "path": path}
+	for k, v := range map[string]string{"caption": *caption, "parse_mode": *parseMode, "idempotency_key": *key} {
+		if v != "" {
+			call[k] = v
+		}
+	}
+	if *asDocument {
+		call["as_document"] = true
+	}
+	if *replyTo != 0 {
+		call["reply_to"] = *replyTo
+	}
+	if *topicID != 0 {
+		call["topic_id"] = *topicID
+	}
+	id, err := dlclient.Send(ctx, cs, call, os.Stderr)
+	if errors.Is(err, context.Canceled) {
+		return errors.New("stopped waiting; the upload goes on in the server, run the same command again to wait for it")
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Println(id)
 	return nil
 }

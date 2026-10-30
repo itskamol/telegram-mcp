@@ -1,6 +1,6 @@
 # Spec: fast `send_file` that can outlive one tool call
 
-Status: approved; measured (commit 1 ships mode C). Nothing implemented yet.
+Status: approved; measured; implemented (commits 1–3), not yet released.
 
 Companion of `docs/specs/download-media.md`, which did the same for
 downloads; this reuses what it built (DC pools, the job registry, the
@@ -137,6 +137,18 @@ telegram-mcp send --chat me --file report.pdf [--caption "…"] [--parse-mode ma
 - `send_file`'s description and its `uploading` answer (`next`) point
   shell-capable agents at the CLI, as `download_media` does.
 
+*As built:* the CLI does **not** make up a key. With a random key, the
+command an `uploading` answer points at would be a second upload and a
+second message, since the tool call that started it had a different (or
+derived) key. Without `--idempotency-key` the CLI sends no key, so the
+server derives the same key from the arguments (real path, size, modtime,
+caption, …) that a `send_file` call with those arguments gets: the
+command's repeated calls, a re-run, and the earlier tool call are one job.
+`next` gives the full command, every keyed argument included and quoted
+for a POSIX shell. What this gives up: after a server restart, a re-run
+without a key cannot be deduplicated by Telegram (`random_id` is random),
+the same as `send_file` without a key; pass `--idempotency-key` for that.
+
 ---
 
 ## Tests
@@ -164,7 +176,7 @@ Commit 2 (`internal/mcpserver`, gated fake upload):
 
 Commit 3 (`internal/dlclient` generalised, or a sibling `sendclient`):
 - Loop until sent; error at once; cancel stops waiting only.
-- The CLI passes the same generated key on every call.
+- The CLI adds no key; every call has the same arguments.
 - Read-only server: clear error, nothing sent.
 
 Mutation checks as for downloads.

@@ -523,6 +523,11 @@ func TestDownloadDescriptionMentionsCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tool := range res.Tools {
+		if tool.Name == "send_file" && !strings.Contains(tool.Description, "telegram-mcp send") {
+			t.Errorf("send_file description lacks the CLI: %s", tool.Description)
+		}
+	}
+	for _, tool := range res.Tools {
 		if tool.Name == "download_media" {
 			for _, want := range []string{"telegram-mcp download", "do not poll"} {
 				if !strings.Contains(strings.ToLower(tool.Description), want) {
@@ -592,8 +597,10 @@ func TestSendFileInBackground(t *testing.T) {
 	if first.Uploaded != 2*512<<10 {
 		t.Errorf("uploaded = %d, want the 2 parts that got through (%d)", first.Uploaded, 2*512<<10)
 	}
-	if !strings.Contains(first.Next, "send_file") || !strings.Contains(strings.ToLower(first.Next), "same") {
-		t.Errorf("next = %q, want it to say: call send_file again with the same arguments", first.Next)
+	for _, want := range []string{"send_file", "same", "telegram-mcp send --chat me --file ", "up.bin --as-document`"} {
+		if !strings.Contains(first.Next, want) {
+			t.Errorf("next = %q, lacks %q", first.Next, want)
+		}
 	}
 	if again, err := sendUp(t, s, ""); err != nil || again.Status != "uploading" {
 		t.Fatalf("second call = %+v, %v; want still uploading", again, err)
@@ -689,5 +696,26 @@ func TestSendFileShutdownCancels(t *testing.T) {
 	lines := auditLines(t, s, "send_file")
 	if len(lines) != 1 || !strings.Contains(lines[0], "server stopped") {
 		t.Errorf("audit = %v, want one line saying the server stopped", lines)
+	}
+}
+
+// The command in "next" carries every argument that makes the upload's
+// key, so it joins the same upload; values are quoted for a POSIX shell.
+func TestSendCommand(t *testing.T) {
+	for _, c := range []struct {
+		in   sendFileIn
+		path string
+		want string
+	}{
+		{sendFileIn{Chat: "me"}, "/r/a.bin", "telegram-mcp send --chat me --file /r/a.bin"},
+		{sendFileIn{Chat: "-1004325193310", Caption: "it's done", ParseMode: "markdown", AsDocument: true,
+			ReplyTo: 7, TopicID: 9, IdempotencyKey: "k 1"}, "/r/my file.pdf",
+			"telegram-mcp send --chat -1004325193310 --file '/r/my file.pdf' --caption 'it'\\''s done' " +
+				"--parse-mode markdown --as-document --reply-to 7 --topic-id 9 --idempotency-key 'k 1'"},
+		{sendFileIn{Chat: "@a$b", Caption: ""}, "/r/x", "telegram-mcp send --chat '@a$b' --file /r/x"},
+	} {
+		if got := sendCommand(c.in, c.path); got != c.want {
+			t.Errorf("sendCommand(%+v, %q) =\n %s\nwant\n %s", c.in, c.path, got, c.want)
+		}
 	}
 }
